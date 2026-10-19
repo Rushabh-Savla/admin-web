@@ -84,7 +84,7 @@ flowchart LR
 ## 3. Repository structure
 
 ```text
-web_page/
+web-app/
 ├── .env.example                 # template for environment values
 ├── .env                        # local secrets and runtime config (do not commit)
 ├── docker-compose.yml          # orchestrates Postgres, migration, controller, worker
@@ -244,59 +244,149 @@ dataset_files
 
 ## 6. End-to-end operational workflow
 
-### Step 1 — Prepare the environment
+### Step 1 — Prepare the environment (.env configuration)
 
-1. Copy the template:
-   ```bash
-   cp .env.example .env
-   ```
-2. Open `.env` and replace the placeholder values with your local setup.
-3. At minimum, update the PostgreSQL section:
-   ```dotenv
-   POSTGRES_HOST=postgres
-   POSTGRES_PORT=5432
-   POSTGRES_DB=annotation_db
-   POSTGRES_USER=annotation_user
-   POSTGRES_PASSWORD=your_secure_password
-   DATABASE_URL=postgresql://annotation_user:your_secure_password@postgres:5432/annotation_db
-   ```
-4. Update NAS values for your storage target, such as:
-   ```dotenv
-   NAS_STORAGE_TYPE=sftp
-   NAS_HOST=192.168.1.100
-   NAS_PORT=22
-   NAS_USER=nas_user
-   NAS_PASSWORD=nas_password
-   NAS_ROOT_PATH=/data
-   ```
-5. Set `RCLONE_CONFIG_PATH` to `/secrets/rclone.conf` and update the remote config in that file.
-6. Ensure Docker and Docker Compose are installed.
+Follow these steps carefully to generate secure keys and configure `.env` before running the containers.
+
+#### 1.1 Copy the template file
+```bash
+cd web-app
+cp .env.example .env
+```
+
+#### 1.2 Generate `APP_SECRET_KEY` (64-character random key)
+The application requires a 64-character cryptographically secure key for signing sessions and JWT tokens.
+Generate it in your terminal:
+```bash
+openssl rand -hex 32
+```
+*(Or with Python: `python3 -c "import secrets; print(secrets.token_hex(32))"`)*
+
+In `.env`, set:
+```dotenv
+APP_SECRET_KEY=<your_generated_64_character_hex_key>
+```
+*Example:* `APP_SECRET_KEY=9e4a8b72c6d5e1f0284719acb3d5e7f01248a6cb9e2d3f4a5b6c7d8e9f0a1b2c`
+
+#### 1.3 Generate `POSTGRES_PASSWORD` and update `DATABASE_URL`
+Generate a strong random password for PostgreSQL:
+```bash
+openssl rand -hex 16
+```
+*Example output:* `9a8f3b2c1d4e5f60718293a4b5c6d7e8`
+
+In `.env`, set **both** `POSTGRES_PASSWORD` and the password in `DATABASE_URL` to the exact same generated string:
+```dotenv
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+POSTGRES_DB=annotation_db
+POSTGRES_USER=annotation_user
+POSTGRES_PASSWORD=9a8f3b2c1d4e5f60718293a4b5c6d7e8
+DATABASE_URL=postgresql://annotation_user:9a8f3b2c1d4e5f60718293a4b5c6d7e8@postgres:5432/annotation_db
+```
+
+> **Important Notes:**
+> - The password inside `DATABASE_URL` (`postgresql://annotation_user:<password>@postgres:5432/annotation_db`) **must match** `POSTGRES_PASSWORD` exactly.
+> - Generating a hexadecimal password via `openssl rand -hex 16` is strongly recommended because it uses characters `[0-9a-f]`, completely avoiding URL-encoding conflicts with special characters (like `@`, `:`, `/`, or `#`) in the connection string.
+
+#### 1.4 Generate `BOOTSTRAP_ADMIN_TOKEN`
+Generate a one-time random bootstrap token for administrative CLI setup:
+```bash
+openssl rand -hex 16
+```
+In `.env`, set:
+```dotenv
+BOOTSTRAP_ADMIN_TOKEN=<your_generated_token>
+```
+
+#### 1.5 Configure NAS storage connection details
+Specify the connection details for the dataset storage NAS:
+```dotenv
+NAS_STORAGE_TYPE=sftp        # Protocol: sftp, smb, webdav, or local
+NAS_HOST=192.168.1.100       # NAS hostname or IP address
+NAS_PORT=22                  # Port (22 for SFTP, 445 for SMB, etc.)
+NAS_USER=nas_user            # NAS login username
+NAS_PASSWORD=nas_password    # NAS login password
+NAS_KEY_FILE=                # Optional path to private SSH key (e.g. /secrets/id_rsa)
+NAS_ROOT_PATH=/data          # Base root path on the NAS
+```
+
+#### 1.6 Ensure secrets directory exists
+```bash
+mkdir -p secrets
+```
+*(The platform will automatically generate `secrets/rclone.conf` on startup using the environment variables).*
+
+---
 
 ### Step 2 — Start the platform
 
 ```bash
-cd web_page
-./run_web.sh
-```
-
-or
-
-```bash
-cd web_page
+cd web-app
 docker compose up -d
 ```
+*(or run `./run_web.sh`)*
 
 Open:
-
 - Web dashboard: http://localhost:8080/dashboard
 - API docs: http://localhost:8080/docs
+
+---
+
+### Troubleshooting: `Container annotation_migrate Error (exit 1)` / Password Authentication Failed
+
+If you run `docker compose up -d` and see:
+```text
+✘ Container annotation_migrate Error service "migrate" didn't complete successfully: exit 1
+```
+And `docker compose logs migrate` shows:
+```text
+psycopg.OperationalError: connection failed: ... FATAL: password authentication failed for user "annotation_user"
+```
+
+#### Why does this happen?
+PostgreSQL stores database data in a persistent Docker named volume (`postgres_data`). When PostgreSQL starts up, if the volume already has an existing database, PostgreSQL logs:
+`PostgreSQL Database directory appears to contain a database; Skipping initialization`
+PostgreSQL **ignores** any new `POSTGRES_PASSWORD` from `.env` and retains the password that was set when the volume was initially created. When the `migrate` container runs `alembic upgrade head`, it attempts to connect using the new password from `.env`, resulting in an authentication mismatch.
+
+#### How to fix:
+
+- **Option A — Update the password in the existing database (Preserves existing data):**
+  If you have existing datasets or users you want to keep:
+  ```bash
+  # 1. Start postgres
+  docker compose up -d postgres
+
+  # 2. Update the user password in PostgreSQL to match POSTGRES_PASSWORD from .env
+  docker compose exec postgres psql -U annotation_user -d annotation_db -c "ALTER USER annotation_user WITH PASSWORD '<YOUR_POSTGRES_PASSWORD>';"
+
+  # 3. Bring up the remaining containers
+  docker compose up -d
+  ```
+
+- **Option B — Clean Reset (Recommended for fresh setup):**
+  If you do not need existing data and want a clean start with your new `.env` settings:
+  ```bash
+  # 1. Stop containers and destroy the old database volume
+  docker compose down -v
+
+  # 2. Re-create containers cleanly
+  docker compose up -d
+  ```
+
+Check container health:
+```bash
+docker compose ps
+```
+
+---
 
 ### Step 3 — Create the first admin user
 
 Once the containers are running, create the first administrator account.
 
 ```bash
-cd web_page
+cd web-app
 docker compose exec controller python -m controller.app.cli create-admin --username admin --password 'Admin@123'
 ```
 
@@ -309,7 +399,7 @@ Then log in using the browser:
 This creates the first administrator account. You can also create additional manager or annotator accounts with:
 
 ```bash
-cd web_page
+cd web-app
 docker compose exec controller python -m controller.app.cli create-user --username annotator1 --password 'StrongPass123' --role ANNOTATOR
 ```
 
@@ -395,7 +485,7 @@ Register dataset
 ### Useful health checks
 
 ```bash
-cd web_page
+cd web-app
 docker compose ps
 
 docker compose logs -f controller
@@ -405,7 +495,7 @@ docker compose logs -f sync_worker
 The project also contains a diagnostic CLI:
 
 ```bash
-cd web_page
+cd web-app
 docker compose exec controller python -m controller.app.cli doctor
 ```
 
@@ -415,31 +505,35 @@ docker compose exec controller python -m controller.app.cli doctor
 
 ### `.env`
 
-Use `.env.example` as the baseline and replace the example values with your own environment details.
+Use `.env.example` as the baseline (`cp .env.example .env`) and configure your values. Never commit `.env` to version control.
 
-The most important part for a new person is this section:
+Key variables to configure:
 
+#### 1. Security & Application Secrets
+- `APP_SECRET_KEY` = 64-character cryptographically secure key used for signing session cookies and JWT tokens.
+  - Generate via: `openssl rand -hex 32` (or Python: `secrets.token_hex(32)`)
+- `BOOTSTRAP_ADMIN_TOKEN` = One-time secure admin bootstrap token (CLI only, invalidated upon admin creation).
+  - Generate via: `openssl rand -hex 16`
+
+#### 2. PostgreSQL Connection Settings
 ```dotenv
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
 POSTGRES_DB=annotation_db
 POSTGRES_USER=annotation_user
-POSTGRES_PASSWORD=strong_password
-DATABASE_URL=postgresql://annotation_user:strong_password@postgres:5432/annotation_db
+POSTGRES_PASSWORD=replace_with_strong_random_password
+DATABASE_URL=postgresql://annotation_user:replace_with_strong_random_password@postgres:5432/annotation_db
 ```
 
-What this means in plain English:
+What this means:
+- `POSTGRES_USER` = The database username your app logs in with.
+- `POSTGRES_PASSWORD` = The raw password for that database user. Generate via `openssl rand -hex 16`.
+- `POSTGRES_DB` = The database name to use (default: `annotation_db`).
+- `DATABASE_URL` = Full SQLAlchemy connection string: `postgresql://<user>:<password>@postgres:5432/<db>`.
+- **Note:** The password in `DATABASE_URL` **must match** `POSTGRES_PASSWORD`. Using hexadecimal strings avoids URL-encoding issues with symbols.
+- **Volume Note:** PostgreSQL initializes the database password only on the first run of the persistent Docker volume (`postgres_data`). If changing the password later, refer to the [Troubleshooting section](#troubleshooting-container-annotation_migrate-error-exit-1--password-authentication-failed) to synchronize the database user password.
 
-- `POSTGRES_USER` = the database username your app will log in with.
-- `POSTGRES_PASSWORD` = the password for that database user.
-- `POSTGRES_DB` = the database name the app should use.
-- `DATABASE_URL` = the exact SQLAlchemy connection string built from the previous values.
-- `postgres` in the URL is the Docker service name, not a local machine host name.
-
-If you keep the default local Docker setup, these values are usually fine as-is, except that `POSTGRES_PASSWORD` must be changed to a real secure password.
-
-For the NAS side, set values like:
-
+#### 3. NAS & Storage Settings
 ```dotenv
 NAS_STORAGE_TYPE=sftp
 NAS_HOST=192.168.1.100
@@ -454,11 +548,71 @@ ANNOTATION_WORKSPACE_ROOT=annotation_workspaces
 RCLONE_CONFIG_PATH=/secrets/rclone.conf
 ```
 
-These tell the app where the remote dataset storage is and what workspace to use for assignment staging.
+These tell the platform how to connect to the dataset NAS and where to stage workspace files for annotation.
 
-### `secrets/rclone.conf`
+### `secrets/rclone.conf` & NAS Setup Guide
 
-This file is used by rclone to connect to the NAS or remote storage. It should be configured for the remote you want the platform to scan and sync.
+The background worker and catalog synchronization service use **Rclone** to communicate with the remote NAS storage.
+
+#### 1. Install Rclone (Host Machine)
+```bash
+sudo apt update
+sudo apt install rclone
+```
+
+#### 2. Configure Rclone Remote Interactively
+Run the interactive configuration wizard:
+```bash
+rclone config
+```
+
+Follow the prompts step-by-step:
+1. `n/s/q>`: Type `n` (New remote)
+2. `name>`: Type `annotation_nas` *(Must match `DEFAULT_REMOTE_NAME` in `.env`)*
+3. `Storage>`: Type `sftp` *(for SSH/SFTP storage)*
+4. `host>`: Enter your NAS IP address or hostname (e.g. `192.168.1.100`)
+5. `user>`: Enter your NAS SSH username (e.g. `Annotation` or `nas_user`)
+6. `port>`: Press Enter to accept default `22` (or specify custom port)
+7. `y/g/n>`: Type `y` to type in your password manually
+8. `SSH password>`: Enter password, then confirm when prompted
+9. `key_pem>`: Press Enter (leave blank)
+10. `key_file>`: Press Enter (leave blank unless using an SSH private key)
+11. `key_file_pass>`: Type `n`
+12. `pubkey_file>`: Press Enter (leave blank)
+13. `key_use_agent>`: Press Enter (default `false`)
+14. `use_insecure_cipher>`: Press Enter (default `false`)
+15. `disable_hashcheck>`: Press Enter (default `false`)
+16. `Edit advanced config? (y/n)>`: Type `n`
+17. `Keep this "annotation_nas" remote? (y/e/d)>`: Type `y`
+18. `e/n/d/r/c/s/q>`: Type `q` to quit config
+
+#### 3. Test NAS Connectivity
+Verify that the remote NAS is accessible and can list directories:
+```bash
+rclone lsd annotation_nas:
+```
+*If your datasets are located in a subfolder like `/data`, verify with:*
+```bash
+rclone lsd annotation_nas:/data
+```
+
+#### 4. Link Configuration to the Docker Container
+You have two straightforward options:
+
+- **Option A (Automatic Generation via `.env` - Recommended):**
+  When you set `NAS_STORAGE_TYPE=sftp`, `NAS_HOST`, `NAS_PORT`, `NAS_USER`, and `NAS_PASSWORD` in `web-app/.env`, the central controller automatically obscures the password and writes `secrets/rclone.conf` on startup with secure `600` permissions.
+- **Option B (Copy from Host):**
+  If you ran `rclone config` on the host, copy the generated file directly:
+  ```bash
+  mkdir -p secrets
+  cp ~/.config/rclone/rclone.conf secrets/rclone.conf
+  chmod 600 secrets/rclone.conf
+  ```
+
+#### 5. Background NAS Synchronization & Offline Resilience
+- **Durable Job Queue:** File operations (`CATALOG_SCAN`, `PREPARE_ASSIGNMENT`, `UPLOAD_ANNOTATION`) are queued in PostgreSQL and executed asynchronously by `annotation_sync_worker`.
+- **Automatic Retries:** If the NAS is temporarily disconnected or unreachable, transfers automatically back off exponentially (10s, 20s, 40s... up to 900s) and resume once connectivity is restored.
+- **Non-Destructive Publishing:** The worker verifies file integrity before copying and never deletes or overwrites canonical source datasets on the NAS.
 
 ---
 
@@ -501,10 +655,10 @@ This README is intentionally written as a full project guide so reviewers can un
 ## 11. Quick start summary
 
 ```bash
-cd web_page
+cd web-app
 cp .env.example .env
-# edit .env and secrets/rclone.conf
-./run_web.sh
+# edit .env and secrets/rclone.conf (generate keys as described in Step 1)
+docker compose up -d
 
 docker compose exec controller python -m controller.app.cli create-admin --username admin --password 'Admin@123'
 ```
