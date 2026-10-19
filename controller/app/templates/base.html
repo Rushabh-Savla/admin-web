@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Central Annotation Platform{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body>
+  <header>
+    <h1><a href="/dashboard" style="color: inherit; text-decoration: none;">NAS Data Annotation Platform</a></h1>
+    <nav>
+      {% if current_user %}
+        <span id="nas-status-badge" style="padding: 4px 10px; border-radius: 9999px; font-size: 0.8rem; font-weight: 600; background: #e2e8f0; color: #475569; display: inline-flex; align-items: center; gap: 4px;">
+          <span>⚪</span> NAS: Checking...
+        </span>
+        <a href="/dashboard">Projects &amp; Dashboard</a>
+        <a href="/dashboard/datasets">NAS Explorer</a>
+        {% if current_user.role in ['ADMIN', 'MANAGER'] %}
+          <a href="/dashboard/users">Users &amp; Devices</a>
+          <a href="/dashboard/operations">Operations &amp; Logs</a>
+        {% endif %}
+
+        <!-- Notification Bell with Pending Action Triggers -->
+        <div class="notif-wrapper" style="position: relative; display: inline-flex; align-items: center; margin-left: 0.75rem;">
+          <button id="notif-bell-btn" type="button" onclick="toggleNotificationDropdown(event)" style="background: #ffffff; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 1.05rem; cursor: pointer; position: relative; display: inline-flex; align-items: center; gap: 4px; transition: background 0.15s ease;" title="Pending Master Approvals &amp; Triggers">
+            🔔
+            <span id="notif-count-badge" style="display: none; background: #ef4444; color: #ffffff; font-size: 0.72rem; font-weight: 700; border-radius: 9999px; padding: 1px 6px; min-width: 18px; text-align: center;">0</span>
+          </button>
+
+          <!-- Dropdown Menu for Notifications -->
+          <div id="notif-dropdown-menu" style="display: none; position: absolute; right: 0; top: calc(100% + 8px); width: 380px; background: #ffffff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.15), 0 8px 10px -6px rgba(0,0,0,0.1); z-index: 2000; overflow: hidden; text-align: left;">
+            <div style="padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); background: #f8fafc; display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: 700; font-size: 0.9rem; color: var(--text);">🔔 Action Triggers &amp; Approvals</span>
+              <button type="button" onclick="fetchNotifications()" style="background: none; border: none; font-size: 0.8rem; color: var(--primary); cursor: pointer; font-weight: 600;">🔄 Refresh</button>
+            </div>
+            <div id="notif-items-container" style="max-height: 380px; overflow-y: auto; padding: 0.5rem 0.75rem;">
+              <p style="text-align: center; color: var(--text-muted); font-size: 0.85rem; padding: 1rem 0; margin-bottom: 0;">Loading triggers...</p>
+            </div>
+          </div>
+        </div>
+
+        <span style="margin-left: 1.25rem; color: var(--text-muted); font-size: 0.85rem;">
+          {{ current_user.username }} ({{ current_user.role }})
+        </span>
+        <a href="/dashboard/logout" style="color: var(--danger);">Logout</a>
+      {% else %}
+        <a href="/dashboard/login">Login</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <!-- Real-time NAS Disconnection Alert Banner -->
+  <div id="nas-alert-banner" style="display: none; background: #fee2e2; border-bottom: 2px solid #ef4444; color: #991b1b; padding: 12px 24px; font-weight: bold; text-align: center; font-size: 0.95rem;">
+    ⚠️ <strong>NAS Storage Disconnected:</strong> Cannot reach NAS storage. File syncing, dataset browsing, and batch staging are paused. Please verify NAS connection. <span id="nas-alert-error" style="font-weight: normal; font-size: 0.85rem; opacity: 0.85;"></span>
+  </div>
+
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
+

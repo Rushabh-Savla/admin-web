@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+{% block title %}Operations &amp; Audit Logs - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1.5rem;">
+  <h2>System Operations &amp; Audit Trail</h2>
+  <p style="color: var(--text-muted); font-size: 0.95rem;">
+    Real-time background job execution queue and complete audit history.
+  </p>
+</div>
+
+<!-- Tabs Switcher -->
+<div style="display: flex; gap: 0.5rem; border-bottom: 2px solid var(--border); margin-bottom: 1.5rem;">
+  <button id="tab-btn-jobs" type="button" onclick="switchOperationsTab('jobs')" class="btn" style="border-radius: 6px 6px 0 0; padding: 0.6rem 1.25rem; font-weight: 600; font-size: 0.95rem; {% if active_tab == 'audit' %}background: transparent; color: var(--text-muted); border-bottom: none;{% else %}background: var(--primary); color: #ffffff;{% endif %}">
+    🔄 Sync Jobs Queue <span class="badge" style="background: rgba(255,255,255,0.25); color: inherit; margin-left: 0.35rem;">{{ jobs|length }}</span>
+  </button>
+  <button id="tab-btn-audit" type="button" onclick="switchOperationsTab('audit')" class="btn" style="border-radius: 6px 6px 0 0; padding: 0.6rem 1.25rem; font-weight: 600; font-size: 0.95rem; {% if active_tab == 'audit' %}background: var(--primary); color: #ffffff;{% else %}background: transparent; color: var(--text-muted); border-bottom: none;{% endif %}">
+    🛡️ Audit Trail <span class="badge" style="background: rgba(255,255,255,0.25); color: inherit; margin-left: 0.35rem;">{{ events|length }}</span>
+  </button>
+</div>
+
+<!-- Tab Pane 1: Sync Jobs -->
+<div id="tab-pane-jobs" style="{% if active_tab == 'audit' %}display: none;{% endif %}">
+  <div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+      <h3 class="card-title" style="margin-bottom: 0;">Job Execution Queue (PostgreSQL-backed)</h3>
+      <button onclick="window.location.reload()" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">
+        🔄 Refresh Queue
+      </button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Job ID</th>
+          <th>Job Type</th>
+          <th>Status</th>
+          <th>Attempts</th>
+          <th>Worker</th>
+          <th>Next Attempt</th>
+          <th>Error Details</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for j in jobs %}
+          <tr>
+            <td>#{{ j.id }}</td>
+            <td><code>{{ j.job_type }}</code></td>
+            <td>
+              <span class="badge badge-{{ j.status.lower() }}">{{ j.status }}</span>
+            </td>
+            <td>{{ j.attempts }} / {{ j.max_retries }}</td>
+            <td>{{ j.claimed_worker or '-' }}</td>
+            <td>{{ j.next_attempt_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td style="color: var(--danger); font-size: 0.8rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+              {{ j.error or '-' }}
+            </td>
+            <td>
+              {% if j.status in ['FAILED', 'RETRYING'] %}
+                <button onclick="retrySyncJob({{ j.id }})" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.8rem;">Retry Now</button>
+              {% else %}
+                -
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No background jobs in queue.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Tab Pane 2: Audit Trail -->
+<div id="tab-pane-audit" style="{% if active_tab != 'audit' %}display: none;{% endif %}">
+  <div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+      <h3 class="card-title" style="margin-bottom: 0;">Recent Security &amp; Operational Audit Events</h3>
+      <button onclick="window.location.reload()" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">
+        🔄 Refresh Audit
+      </button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Timestamp</th>
+          <th>User</th>
+          <th>Action</th>
+          <th>Resource</th>
+          <th>Details</th>
+          <th>IP Address</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for evt in events %}
+          <tr>
+            <td>{{ evt.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td><strong>{{ evt.user.username if evt.user else 'System' }}</strong></td>
+            <td><code>{{ evt.action }}</code></td>
+            <td>{{ evt.resource_type }}:{{ evt.resource_id }}</td>
+            <td style="font-size: 0.85rem; max-width: 320px; word-break: break-all;">
+              {{ evt.details }}
+            </td>
+            <td><code>{{ evt.ip_address or '-' }}</code></td>
+          </tr>
+        {% else %}
+          <tr>
+            <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No audit events recorded yet.</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function switchOperationsTab(tab) {
+  const jobsBtn = document.getElementById("tab-btn-jobs");
+  const auditBtn = document.getElementById("tab-btn-audit");
+  const jobsPane = document.getElementById("tab-pane-jobs");
+  const auditPane = document.getElementById("tab-pane-audit");
+
+  if (tab === "jobs") {
+    jobsPane.style.display = "block";
+    auditPane.style.display = "none";
+    jobsBtn.style.background = "var(--primary)";
+    jobsBtn.style.color = "#ffffff";
+    auditBtn.style.background = "transparent";
+    auditBtn.style.color = "var(--text-muted)";
+    history.replaceState(null, "", "/dashboard/operations?tab=jobs");
+  } else {
+    jobsPane.style.display = "none";
+    auditPane.style.display = "block";
+    auditBtn.style.background = "var(--primary)";
+    auditBtn.style.color = "#ffffff";
+    jobsBtn.style.background = "transparent";
+    jobsBtn.style.color = "var(--text-muted)";
+    history.replaceState(null, "", "/dashboard/operations?tab=audit");
+  }
+}
+</script>
+{% endblock %}
+

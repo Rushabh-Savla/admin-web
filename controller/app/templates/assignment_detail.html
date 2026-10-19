@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Assignment #{{ assignment.id }} - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.5rem;">
+  <div>
+    <h2>Assignment #{{ assignment.id }}</h2>
+    <p style="color: var(--text-muted); font-size: 0.95rem;">
+      Dataset: <strong>{{ assignment.dataset.name }}</strong> |
+      Annotator: <strong>{{ assignment.annotator.username }}</strong> |
+      Status: <span class="badge badge-{{ assignment.status.lower() }}">{{ assignment.status }}</span> |
+      Lease Generation: <code>{{ assignment.lease_generation }}</code>
+    </p>
+    {% if assignment.workspace_path %}
+      <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 0.25rem;">
+        NAS Workspace: <code>{{ assignment.workspace_path }}</code>
+      </p>
+    {% endif %}
+  </div>
+
+  {% if current_user.role in ['ADMIN', 'MANAGER'] %}
+    <div style="display: flex; gap: 0.5rem;">
+      {% if assignment.status in ['PREPARING', 'READY', 'IN_PROGRESS'] %}
+        <form method="POST" action="/dashboard/assignments/{{ assignment.id }}/pause">
+          <button type="submit" class="btn btn-secondary">Pause</button>
+        </form>
+      {% elif assignment.status == 'PAUSED' %}
+        <form method="POST" action="/dashboard/assignments/{{ assignment.id }}/resume">
+          <button type="submit" class="btn">Resume</button>
+        </form>
+      {% endif %}
+      {% if assignment.status != 'COMPLETED' and assignment.status != 'CANCELLED' %}
+        <form method="POST" action="/dashboard/assignments/{{ assignment.id }}/cancel" onsubmit="return confirm('Cancel this assignment? Active image claims will be released.');">
+          <button type="submit" class="btn btn-danger">Cancel</button>
+        </form>
+      {% endif %}
+    </div>
+  {% endif %}
+</div>
+
+{% if assignment.status == 'SUBMITTED_FOR_REVIEW' and current_user.role in ['ADMIN', 'MANAGER'] %}
+<div class="card" style="border-left: 4px solid var(--warning); background: #fffbeb; margin-bottom: 1.5rem; padding: 1.25rem;">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+    <div>
+      <h3 style="margin-bottom: 0.25rem; color: #92400e;">🔔 Assignment Submitted for Master Completion Approval</h3>
+      <p style="margin-bottom: 0; font-size: 0.9rem; color: #b45309;">
+        Annotator <strong>{{ assignment.annotator.username }}</strong> has completed all {{ assignment.allocated_count }} assigned images and submitted this assignment. Approving will mark all images verified complete and release file locks.
+      </p>
+    </div>
+    <div style="display: flex; gap: 0.75rem; align-items: center;">
+      <form method="POST" action="/dashboard/assignments/{{ assignment.id }}/approve" style="display: inline; margin: 0;">
+        <button type="submit" class="btn" style="background: var(--success); color: #fff; font-weight: 600; padding: 0.45rem 1.15rem; font-size: 0.9rem;">
+          ✅ Approve Complete Assignment
+        </button>
+      </form>
+      <button type="button" onclick="denyAssignmentDirect({{ assignment.id }})" class="btn btn-secondary" style="color: var(--danger); font-weight: 600; padding: 0.45rem 1.15rem; font-size: 0.9rem;">
+        ❌ Deny &amp; Request Rework
+      </button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 class="card-title">Item Progress Breakdown</h3>
+  <div class="grid-4" style="margin-bottom: 1rem;">
+    <div class="stat-box">
+      <div class="lbl">Total Allocated</div>
+      <div class="val">{{ assignment.allocated_count }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="lbl">Verified Complete</div>
+      <div class="val" style="color: var(--success);">{{ status_counts.get('VERIFIED_COMPLETE', 0) }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="lbl">Background Declared</div>
+      <div class="val" style="color: #6366f1;">{{ status_counts.get('BACKGROUND_DECLARED', 0) + status_counts.get('BACKGROUND_APPROVED', 0) }}</div>
+    </div>
+    <div class="stat-box">
+      <div class="lbl">Pending / In Progress</div>
+      <div class="val" style="color: var(--warning);">{{ status_counts.get('PENDING', 0) + status_counts.get('DOWNLOADING', 0) + status_counts.get('ANNOTATING', 0) + status_counts.get('FAILED', 0) + status_counts.get('CONFLICT', 0) }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Assigned Images Manifest (Showing up to 200 items)</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Relative Image Path</th>
+        <th>File Size</th>
+        <th>State</th>
+        <th>Error / Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for itm in items[:200] %}
+        <tr>
+          <td>{{ itm.ordinal }}</td>
+          <td><code>{{ itm.file.normalized_path }}</code></td>
+          <td>{{ itm.file.size }} bytes</td>
+          <td>
+            <span class="badge badge-{{ itm.item_state.lower() }}">{{ itm.item_state }}</span>
+          </td>
+          <td style="color: var(--text-muted); font-size: 0.85rem;">{{ itm.error or '-' }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

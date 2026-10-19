@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}System Activity - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
+  <div>
+    <h2 style="margin-bottom: 0.2rem;">System Activity</h2>
+    <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 0;">
+      Unified audit logging, synchronization queue monitoring, and operational history.
+    </p>
+  </div>
+</div>
+
+<!-- Internal Activity Subnavigation Tabs -->
+<div class="subnav-tabs">
+  <a href="/dashboard/activity?tab=all{% if selected_source and selected_source != 'ALL' %}&source={{ selected_source }}{% endif %}" class="subnav-tab {% if active_tab == 'all' %}active{% endif %}">
+    📋 All Activity ({{ all_activity|length }})
+  </a>
+  <a href="/dashboard/activity?tab=jobs" class="subnav-tab {% if active_tab == 'jobs' %}active{% endif %}">
+    🔄 Sync Jobs Queue ({{ jobs|length }})
+  </a>
+  <a href="/dashboard/activity?tab=audit" class="subnav-tab {% if active_tab == 'audit' %}active{% endif %}">
+    🛡️ Audit Trail ({{ events|length }})
+  </a>
+</div>
+
+<!-- ========================================================================= -->
+<!-- VIEW 1: ALL ACTIVITY (Unified Chronological Feed)                         -->
+<!-- ========================================================================= -->
+{% if active_tab == 'all' %}
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 1rem;">
+    <h3 class="card-title" style="margin-bottom: 0;">Chronological Activity Feed</h3>
+    
+    <!-- Filter by source type -->
+    <div style="display: flex; align-items: center; gap: 0.6rem;">
+      <label for="activity_source_filter" style="font-size: 0.88rem; font-weight: 600; color: var(--text-muted);">Source Filter:</label>
+      <select 
+        id="activity_source_filter" 
+        style="padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid var(--border); font-size: 0.88rem;"
+        onchange="window.location.href = '/dashboard/activity?tab=all&source=' + this.value;"
+      >
+        <option value="ALL" {% if selected_source == 'ALL' %}selected{% endif %}>All Sources</option>
+        <option value="SYNC_JOB" {% if selected_source == 'SYNC_JOB' %}selected{% endif %}>Sync Jobs Only</option>
+        <option value="AUDIT_EVENT" {% if selected_source == 'AUDIT_EVENT' %}selected{% endif %}>Audit Events Only</option>
+      </select>
+    </div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 170px;">Timestamp</th>
+        <th style="width: 110px;">Source</th>
+        <th>Event / Action</th>
+        <th>Actor / Worker</th>
+        <th>Target / Entity</th>
+        <th>Status</th>
+        <th>Details / Metadata</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for act in all_activity %}
+        <tr>
+          <td style="font-size: 0.85rem; color: var(--text-muted); white-space: nowrap;">
+            {{ act.timestamp.strftime('%Y-%m-%d %H:%M:%S') if act.timestamp else '-' }}
+          </td>
+          <td>
+            {% if act.source == 'SYNC_JOB' %}
+              <span class="activity-badge activity-badge-sync">Sync Job</span>
+            {% else %}
+              <span class="activity-badge activity-badge-audit">Audit Event</span>
+            {% endif %}
+          </td>
+          <td><code>{{ act.event_type }}</code></td>
+          <td><strong>👤 {{ act.actor }}</strong></td>
+          <td><code>{{ act.entity_id }}</code></td>
+          <td>
+            <span class="badge badge-{{ act.status.lower() }}">{{ act.status }}</span>
+          </td>
+          <td style="font-size: 0.83rem; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ act.details }}">
+            {{ act.details }}
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+            No activities recorded matching the current filter.
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- ========================================================================= -->
+<!-- VIEW 2: SYNC JOBS (Dedicated Queue & Retry View)                          -->
+<!-- ========================================================================= -->
+{% if active_tab == 'jobs' %}
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h3 class="card-title" style="margin-bottom: 0;">Background Job Queue (PostgreSQL-backed)</h3>
+    <button type="button" onclick="window.location.reload()" class="btn btn-secondary" style="font-size: 0.82rem; padding: 0.35rem 0.75rem;">🔄 Refresh Queue</button>
+  </div>
+  <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+    Active and historical catalog scans, image downloads, staging jobs, and remote NAS synchronization tasks.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 70px;">Job ID</th>
+        <th>Job Type</th>
+        <th>Status</th>
+        <th>Attempts</th>
+        <th>Worker</th>
+        <th>Next Attempt</th>
+        <th>Error Details</th>
+        <th style="width: 100px;">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for j in jobs %}
+        <tr>
+          <td>#{{ j.id }}</td>
+          <td><code>{{ j.job_type }}</code></td>
+          <td>
+            <span class="badge badge-{{ j.status.lower() }}">{{ j.status }}</span>
+          </td>
+          <td>{{ j.attempts }} / {{ j.max_retries }}</td>
+          <td>{{ j.claimed_worker or '-' }}</td>
+          <td style="font-size: 0.85rem; color: var(--text-muted);">
+            {{ j.next_attempt_at.strftime('%Y-%m-%d %H:%M:%S') if j.next_attempt_at else '-' }}
+          </td>
+          <td style="color: var(--danger); font-size: 0.8rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ j.error or '-' }}">
+            {{ j.error or '-' }}
+          </td>
+          <td>
+            {% if j.status in ['FAILED', 'RETRYING'] %}
+              <button type="button" onclick="retrySyncJob({{ j.id }})" class="btn btn-secondary" style="padding: 0.2rem 0.55rem; font-size: 0.8rem;">Retry Now</button>
+            {% else %}
+              <span style="color: var(--text-muted); font-size: 0.8rem;">-</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No background jobs in queue.</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<!-- ========================================================================= -->
+<!-- VIEW 3: AUDIT LOG (Security & Administrative History)                     -->
+<!-- ========================================================================= -->
+{% if active_tab == 'audit' %}
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h3 class="card-title" style="margin-bottom: 0;">Security &amp; Management Audit Trail</h3>
+    <button type="button" onclick="window.location.reload()" class="btn btn-secondary" style="font-size: 0.82rem; padding: 0.35rem 0.75rem;">🔄 Refresh Log</button>
+  </div>
+  <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+    Authoritative record of user actions, project creations, deletions, and configuration updates.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 170px;">Timestamp</th>
+        <th>User</th>
+        <th>Action</th>
+        <th>Resource</th>
+        <th>Details</th>
+        <th>IP Address</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for evt in events %}
+        <tr>
+          <td style="font-size: 0.85rem; color: var(--text-muted); white-space: nowrap;">
+            {{ evt.created_at.strftime('%Y-%m-%d %H:%M:%S') if evt.created_at else '-' }}
+          </td>
+          <td><strong>👤 {{ evt.user.username if evt.user else 'System' }}</strong></td>
+          <td><code>{{ evt.action }}</code></td>
+          <td>{{ evt.resource_type }}:{{ evt.resource_id }}</td>
+          <td style="font-size: 0.82rem; max-width: 320px; word-break: break-all;">
+            {{ evt.details }}
+          </td>
+          <td><code>{{ evt.ip_address or '-' }}</code></td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No audit events recorded yet.</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}
