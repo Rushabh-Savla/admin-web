@@ -79,8 +79,16 @@
             <button type="submit" class="btn btn-secondary" title="Move all annotated and background images into the project root directory and purge completed assignment subdirectories">📦 Consolidate to Main Folder</button>
           </form>
           <button onclick="triggerScan({{ dataset.id }})" class="btn btn-secondary">🔄 Re-scan NAS</button>
-          {% if available_images > 0 %}
+          {% if dataset.catalog_state == 'SCANNING' %}
+            <span class="badge" style="background: #fef3c7; color: #92400e; font-size: 0.85rem; padding: 0.45rem 0.85rem; font-weight: 600; border: 1px solid #fde68a;">
+              ⏳ Scanning NAS Catalog...
+            </span>
+          {% elif available_images > 0 %}
             <a href="/dashboard/assignments?project_id={{ dataset.id }}#wizard" class="btn btn-primary">+ Create Assignment</a>
+          {% elif total_images == 0 %}
+            <span class="badge" style="background: #f1f5f9; color: #64748b; font-size: 0.85rem; padding: 0.45rem 0.85rem; font-weight: 600; border: 1px solid var(--border);">
+              📁 No Images Found
+            </span>
           {% elif progress_percent == 100 %}
             <span class="badge badge-completed" style="font-size: 0.85rem; padding: 0.45rem 0.85rem; font-weight: 600;">
               ✅ All Images Completed
@@ -249,5 +257,12 @@ function confirmDeleteProject(id, title, assignmentCount) {
     form.submit();
   }
 }
+
+// Auto-refresh page every 2.5 seconds if dataset is currently scanning
+{% if dataset.catalog_state == 'SCANNING' %}
+setTimeout(function() {
+  window.location.reload();
+}, 2500);
+{% endif %}
 </script>
 {% endblock %}
