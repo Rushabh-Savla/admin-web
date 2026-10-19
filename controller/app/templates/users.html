@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Users & Devices - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+  <h2>User & Device Management</h2>
+</div>
+
+{% if current_user.role in ['ADMIN', 'MANAGER'] %}
+<div class="card">
+  <h3 class="card-title">Create User</h3>
+  <form method="POST" action="/dashboard/users/new" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)) 120px; gap: 1rem; align-items: flex-end;">
+    <div class="form-group" style="margin-bottom: 0;">
+      <label>Username</label>
+      <input type="text" name="username" required>
+    </div>
+    <div class="form-group" style="margin-bottom: 0;">
+      <label>Password</label>
+      <input type="password" name="password" required>
+    </div>
+    <div class="form-group" style="margin-bottom: 0;">
+      <label>Role</label>
+      <select name="role">
+        <option value="ANNOTATOR">ANNOTATOR</option>
+        {% if current_user.role == 'ADMIN' %}
+          <option value="MANAGER">MANAGER</option>
+          <option value="ADMIN">ADMIN</option>
+        {% endif %}
+      </select>
+    </div>
+    <button type="submit" class="btn" style="height: 40px;">Create</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 class="card-title">All Users</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Username</th>
+        <th>Role</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+        <tr>
+          <td>#{{ u.id }}</td>
+          <td><strong>{{ u.username }}</strong></td>
+          <td>{{ u.role }}</td>
+          <td>
+            <span class="badge badge-{{ 'active' if u.is_active else 'inactive' }}">
+              {{ 'ACTIVE' if u.is_active else 'DISABLED' }}
+            </span>
+          </td>
+          <td>{{ u.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>
+            <form method="POST" action="/dashboard/users/{{ u.id }}/toggle" style="display: inline;">
+              <button type="submit" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.8rem;">
+                {{ 'Disable' if u.is_active else 'Enable' }}
+              </button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Enrolled Devices</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Device ID</th>
+        <th>Device Name</th>
+        <th>Assigned User</th>
+        <th>Status</th>
+        <th>Last Seen</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for dev in devices %}
+        <tr>
+          <td><code>{{ dev.device_identifier }}</code></td>
+          <td>{{ dev.name }}</td>
+          <td>{{ dev.user.username }}</td>
+          <td>
+            <span class="badge badge-{{ 'active' if dev.is_active else 'inactive' }}">
+              {{ 'ONLINE' if dev.is_active else 'OFFLINE' }}
+            </span>
+          </td>
+          <td>{{ dev.last_seen_at.strftime('%Y-%m-%d %H:%M:%S') if dev.last_seen_at else 'Never' }}</td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="5" style="text-align: center; color: var(--text-muted);">No client devices enrolled.</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

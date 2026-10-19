@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}Assignments - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+  <h2>Image Assignments</h2>
+</div>
+
+{% if current_user.role in ['ADMIN', 'MANAGER'] %}
+<div class="card" id="wizard">
+  <h3 class="card-title">Assignment Wizard (Atomic Image Allocation)</h3>
+  <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+    Allocates an exact number of eligible images atomically in PostgreSQL with FOR UPDATE SKIP LOCKED.
+  </p>
+
+  {% if error %}
+    <div class="alert alert-danger">{{ error }}</div>
+  {% endif %}
+
+  <form method="POST" action="/dashboard/assignments/new">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem;">
+      <div class="form-group">
+        <label for="wizard_dataset_id">Belongs to Project *</label>
+        <select id="wizard_dataset_id" name="dataset_id" required onchange="updateEligibleCount()">
+          <option value="">-- Select Project --</option>
+          {% for ds in datasets %}
+            <option value="{{ ds.id }}" {% if selected_dataset_id == ds.id %}selected{% endif %} {% if ds.available_images == 0 %}disabled style="color: #94a3b8;"{% endif %}>
+              📁 {{ ds.title or ds.name }} ({{ ds.name }}) &mdash; {% if ds.available_images == 0 %}Completed (0 available){% else %}{{ ds.available_images }} available{% endif %}
+            </option>
+          {% endfor %}
+        </select>
+        <small style="color: var(--text-muted); font-size: 0.8rem;">Select which project folder this assignment belongs to.</small>
+      </div>
+
+      <div class="form-group">
+        <label for="wizard_directory_scope">Directory Scope (Empty for project root)</label>
+        <input type="text" id="wizard_directory_scope" name="directory_scope" value="{{ selected_scope or '' }}" placeholder="e.g. subfolder/class1" oninput="updateEligibleCount()">
+      </div>
+
+      <div class="form-group">
+        <label for="wizard_scope_type">Scope Type</label>
+        <select id="wizard_scope_type" name="scope_type" onchange="updateEligibleCount()">
+          <option value="RECURSIVE">Recursive (all subdirectories)</option>
+          <option value="DIRECT">Direct Only (immediate folder files)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="annotator_id">Assignee (Annotator) *</label>
+        <select id="annotator_id" name="annotator_id" required>
+          <option value="">-- Select Annotator --</option>
+          {% for ann in annotators %}
+            <option value="{{ ann.id }}">{{ ann.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="requested_count">Exact Image Count *</label>
+        <input type="number" id="requested_count" name="requested_count" min="1" max="10000" value="100" required>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+      <span id="wizard_eligible_count" style="font-weight: 600; color: var(--primary); font-size: 0.95rem;">
+        Click or change fields to calculate available count
+      </span>
+      <button type="submit" class="btn">Allocate &amp; Assign to Annotator</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 class="card-title">All Assignments</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Project Folder</th>
+        <th>Scope</th>
+        <th>Annotator</th>
+        <th>Allocated</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in assignments %}
+        <tr>
+          <td>#{{ a.id }}</td>
+          <td><strong>📁 {{ a.dataset.title or a.dataset.name }}</strong><br><small style="color: var(--text-muted);">{{ a.dataset.name }}</small></td>
+          <td><code>{{ a.directory_scope or '/' }} ({{ a.scope_type }})</code></td>
+          <td><strong>👤 {{ a.annotator.username }}</strong></td>
+          <td>{{ a.allocated_count }} images</td>
+          <td>
+            <span class="badge badge-{{ a.status.lower() }}">{{ a.status }}</span>
+          </td>
+          <td>{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+          <td>
+            <a href="/dashboard/assignments/{{ a.id }}" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.8rem;">Details</a>
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="8" style="text-align: center; color: var(--text-muted);">No assignments found.</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

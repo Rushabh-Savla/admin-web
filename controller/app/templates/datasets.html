@@ -1,0 +1,493 @@
+{% extends "base.html" %}
+{% block title %}Datasets & NAS Explorer - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+  <h2>Datasets & Live NAS Directory Browser</h2>
+</div>
+
+{% if request.query_params.get('notice') %}
+<div class="card" style="background: #eff6ff; border: 1px solid #93c5fd; color: #1e40af; padding: 0.75rem 1.2rem; margin-bottom: 1.5rem; border-radius: 6px;">
+  ℹ️ <strong>Notice:</strong> {{ request.query_params.get('notice') }}
+</div>
+{% endif %}
+
+{% if request.query_params.get('error') %}
+<div class="card" style="background: #fef2f2; border: 1px solid #f87171; color: #991b1b; padding: 0.75rem 1.2rem; margin-bottom: 1.5rem; border-radius: 6px;">
+  ⚠️ <strong>Error:</strong> {{ request.query_params.get('error') }}
+</div>
+{% endif %}
+
+{% if current_user.role in ['ADMIN', 'MANAGER'] %}
+<!-- Interactive NAS Directory Explorer -->
+<div class="card" style="margin-bottom: 2rem;">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+    <h3 class="card-title" style="margin-bottom: 0;">📁 Live NAS Storage Explorer</h3>
+    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+      <button id="btn-test-nas" type="button" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">
+        ⚡ Test NAS Connection
+      </button>
+      <button id="btn-refresh-nas" type="button" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">
+        🔄 Refresh
+      </button>
+      <button id="btn-create-project-current" type="button" class="btn btn-primary" style="font-size: 0.85rem; padding: 0.35rem 0.85rem; font-weight: 600;" title="Register Dataset from NAS">
+        ➕ Select Current Folder / Register Dataset from NAS
+      </button>
+    </div>
+  </div>
+
+  <div id="nas-connection-banner" style="display: none; padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem;"></div>
+
+  <!-- Direct Path Search & Jump Bar -->
+  <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem;">
+    <label for="nas-path-input" style="font-weight: 600; font-size: 0.85rem; white-space: nowrap; margin-bottom: 0; color: var(--text-color);">Go to Path:</label>
+    <input type="text" id="nas-path-input" placeholder="Type or paste any NAS path e.g. ai_data_collection/test/images_yolo8" style="flex: 1; padding: 0.45rem 0.75rem; font-size: 0.85rem; font-family: monospace; border: 1px solid var(--border-color); border-radius: 4px;">
+    <button id="btn-go-path" type="button" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.45rem 0.85rem; white-space: nowrap;">
+      🔍 Open Path
+    </button>
+  </div>
+
+  <!-- Breadcrumbs Bar -->
+  <div style="display: flex; align-items: center; gap: 0.5rem; background: var(--bg-hover); padding: 0.6rem 0.85rem; border-radius: 6px; margin-bottom: 1rem; font-family: monospace; font-size: 0.9rem; overflow-x: auto;">
+    <span style="color: var(--primary); font-weight: bold;">{{ default_remote }}:</span>
+    <span id="nas-breadcrumbs"></span>
+  </div>
+
+  <!-- Explorer Container -->
+  <div style="border: 1px solid var(--border-color); border-radius: 6px; max-height: 380px; overflow-y: auto;">
+    <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-bottom: 0;">
+      <thead>
+        <tr style="background: var(--bg-hover); position: sticky; top: 0; z-index: 2;">
+          <th style="padding: 0.6rem 1rem; text-align: left; width: 50%;">Directory / Folder</th>
+          <th style="padding: 0.6rem 1rem; text-align: left; width: 22%;">Modified</th>
+          <th style="padding: 0.6rem 1rem; text-align: right; width: 28%;">Action</th>
+        </tr>
+      </thead>
+      <tbody id="nas-file-list">
+        <tr>
+          <td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">
+            Connecting to NAS and scanning directories...
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.6rem; margin-bottom: 0;">
+    💡 <em>Tip: Browse your NAS folders above. Click <strong>"➕ Create Project"</strong> on any folder row or <strong>"Create Project from Current Folder"</strong> at top to create a project instantly with zero typing!</em>
+  </p>
+</div>
+
+<!-- Quick Link Card to Create Project -->
+<div class="card" style="background: #f8fafc; border: 1px dashed var(--border); padding: 1.25rem 1.5rem; margin-bottom: 2rem;">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+    <div>
+      <h4 style="margin-bottom: 0.25rem; font-size: 1.05rem;">Want to set up a new project?</h4>
+      <p style="color: var(--text-muted); font-size: 0.88rem; margin-bottom: 0;">
+        Select any folder in the NAS Storage Explorer above, or open the project creation wizard directly.
+      </p>
+    </div>
+    <a href="/dashboard/projects/new" class="btn btn-primary" style="font-size: 0.9rem; padding: 0.5rem 1.25rem; font-weight: 600;">
+      + Open Project Creator
+    </a>
+  </div>
+</div>
+{% endif %}
+
+<!-- Existing Datasets / Projects List -->
+<div class="card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+    <h3 class="card-title" style="margin-bottom: 0;">Active Cataloged Projects ({{ datasets|length }})</h3>
+    <a href="/dashboard" class="btn btn-secondary" style="font-size: 0.82rem; padding: 0.35rem 0.75rem;">
+      View Dashboard Folders &rarr;
+    </a>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width: 60px;">ID</th>
+        <th>Project Title / Name</th>
+        <th>Target NAS Directory</th>
+        <th>Status</th>
+        <th>Catalog Version</th>
+        <th style="text-align: right; width: 220px;">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ds in datasets %}
+        <tr>
+          <td>#{{ ds.id }}</td>
+          <td>
+            <strong>{{ ds.title or ds.name }}</strong>
+            {% if ds.title and ds.name != ds.title %}
+              <div style="font-size: 0.78rem; color: var(--text-muted);">Slug: <code>{{ ds.name }}</code></div>
+            {% endif %}
+          </td>
+          <td><code>{{ ds.remote_name }}:{{ ds.remote_path }}</code></td>
+          <td>
+            <span class="badge badge-{{ ds.catalog_state.lower() }}">{{ ds.catalog_state }}</span>
+          </td>
+          <td><code>{{ ds.current_catalog_version or 'Not Scanned' }}</code></td>
+          <td style="text-align: right;">
+            <div style="display: inline-flex; gap: 0.35rem;">
+              <a href="/dashboard/projects/{{ ds.id }}" class="btn btn-secondary" style="padding: 0.25rem 0.55rem; font-size: 0.8rem;">Explore</a>
+              {% if current_user.role in ['ADMIN', 'MANAGER'] %}
+                <button type="button" onclick="triggerScan({{ ds.id }})" class="btn btn-secondary" style="padding: 0.25rem 0.55rem; font-size: 0.8rem;">Scan</button>
+                <button type="button" onclick="confirmDeleteProject({{ ds.id }}, '{{ ds.title or ds.name }}', 0)" class="btn btn-secondary" style="padding: 0.25rem 0.55rem; font-size: 0.8rem; color: var(--danger);" title="Delete Project">🗑️</button>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+            No projects cataloged yet. Select a folder from the NAS Explorer above and click <strong>"➕ Create Project"</strong>!
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<form id="delete-project-form" method="POST" action="" style="display: none;"></form>
+
+<script>
+function confirmDeleteProject(id, title, count) {
+  if (confirm(`Are you sure you want to delete project "${title}"?\n\nThis will remove the project and its records from the database.`)) {
+    const form = document.getElementById("delete-project-form");
+    form.action = `/dashboard/projects/${id}/delete`;
+    form.submit();
+  }
+}
+</div>
+
+<script>
+// General scan trigger available for registered datasets
+async function triggerScan(datasetId) {
+  try {
+    const res = await fetch(`/api/v1/datasets/${datasetId}/scan`, { method: "POST" });
+    if (res.ok) {
+      alert("Catalog scan enqueued. The background worker is inventorying the dataset.");
+      window.location.reload();
+    } else {
+      const err = await res.json();
+      alert("Failed to enqueue scan: " + (err.detail || "Unknown error"));
+    }
+  } catch (e) {
+    alert("Error: " + e.message);
+  }
+}
+</script>
+
+{% if current_user.role in ['ADMIN', 'MANAGER'] %}
+<script>
+// NAS Explorer Client-Side Logic
+let currentNasPath = {{ default_root_path|tojson }};
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function selectDirectoryForDataset(dirName, fullPath) {
+  const nameInput = document.getElementById("dataset_name");
+  const pathInput = document.getElementById("remote_path");
+  const card = document.getElementById("register-card");
+  if (!nameInput || !pathInput || !card) return;
+
+  const rawName = (dirName || fullPath.split("/").filter(Boolean).pop() || "dataset");
+  const safeName = rawName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+  
+  nameInput.value = safeName;
+  pathInput.value = fullPath || "/";
+
+  card.scrollIntoView({ behavior: "smooth" });
+  card.style.outline = "2px solid var(--primary)";
+  setTimeout(() => { card.style.outline = "none"; }, 1500);
+}
+
+function renderBreadcrumbs(path) {
+  const breadcrumbEl = document.getElementById("nas-breadcrumbs");
+  if (!breadcrumbEl) return;
+
+  const isAbs = path.startsWith("/");
+  const segments = path.split("/").filter(Boolean);
+
+  let html = `<a href="javascript:void(0)" class="nas-crumb-link" data-path="${isAbs ? '/' : ''}" style="color: var(--primary); text-decoration: underline; font-weight: bold;">[Root]</a>`;
+
+  let accum = isAbs ? "" : "";
+  segments.forEach((seg, idx) => {
+    accum += (isAbs || idx > 0 ? "/" : "") + seg;
+    const target = accum;
+    html += ` / <a href="javascript:void(0)" class="nas-crumb-link" data-path="${escapeHtml(target)}" style="color: var(--primary); text-decoration: underline;">${escapeHtml(seg)}</a>`;
+  });
+
+  breadcrumbEl.innerHTML = html;
+}
+
+async function loadNasPath(path) {
+  const listEl = document.getElementById("nas-file-list");
+  const bannerEl = document.getElementById("nas-connection-banner");
+  if (!listEl) return;
+
+  currentNasPath = (path !== undefined && path !== null) ? path : "";
+  renderBreadcrumbs(currentNasPath);
+
+  const pathInputBox = document.getElementById("nas-path-input");
+  if (pathInputBox && document.activeElement !== pathInputBox) {
+    pathInputBox.value = currentNasPath;
+  }
+
+  listEl.innerHTML = `<tr><td colspan="3" style="text-align: center; padding: 1.2rem; color: var(--text-muted);">Fetching directories from NAS...</td></tr>`;
+
+  try {
+    const res = await fetch(`/api/v1/nas/browse?path=${encodeURIComponent(currentNasPath)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Network error communicating with server" }));
+      if (bannerEl) {
+        bannerEl.style.display = "block";
+        bannerEl.style.background = "#fee2e2";
+        bannerEl.style.color = "#991b1b";
+        bannerEl.style.border = "1px solid #f87171";
+        bannerEl.innerHTML = `⚠️ <strong>NAS Storage Warning:</strong> ${escapeHtml(err.detail || 'Could not list directory.')}<br><small>Check NAS host reachability and credentials in <code>.env</code>.</small>`;
+      }
+      listEl.innerHTML = `<tr><td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">Unable to list contents for this path. Use "Test NAS Connection" above to diagnose.</td></tr>`;
+      return;
+    }
+
+    if (bannerEl && bannerEl.dataset.persistent !== "true") {
+      bannerEl.style.display = "none";
+    }
+
+    const data = await res.json();
+    let rowsHtml = "";
+
+    // "Up to parent" row if parent_path is available
+    if (data.parent_path !== null && data.parent_path !== undefined) {
+      rowsHtml += `
+        <tr style="border-bottom: 1px solid var(--border-color); background: var(--bg-hover);">
+          <td style="padding: 0.5rem 1rem;">
+            <a href="javascript:void(0)" class="nas-nav-link" data-path="${escapeHtml(data.parent_path)}" style="font-weight: bold; text-decoration: none; color: var(--primary);">
+              📁 .. (Go Up)
+            </a>
+          </td>
+          <td style="padding: 0.5rem 1rem; color: var(--text-muted); font-size: 0.85rem;">Parent Directory</td>
+          <td style="padding: 0.5rem 1rem; text-align: right;">-</td>
+        </tr>
+      `;
+    }
+
+    if (data.directories.length === 0 && (!data.images_count || data.images_count === 0)) {
+      rowsHtml += `
+        <tr>
+          <td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">
+            No subdirectories or images found directly inside this folder.<br>
+            <small>You can click <strong>"Select Current Folder"</strong> at top to register this folder as a dataset.</small>
+          </td>
+        </tr>
+      `;
+    }
+
+    // Render directory rows
+    data.directories.forEach(dir => {
+      const modTimeStr = dir.mod_time ? dir.mod_time.slice(0, 19).replace('T', ' ') : '-';
+      rowsHtml += `
+        <tr style="border-bottom: 1px solid var(--border-color);">
+          <td style="padding: 0.6rem 1rem;">
+            <a href="javascript:void(0)" class="nas-nav-link" data-path="${escapeHtml(dir.relative_path)}" style="font-weight: 600; text-decoration: none; color: var(--primary); display: inline-flex; align-items: center; gap: 0.35rem;">
+              📁 <span>${escapeHtml(dir.name)}</span>/
+            </a>
+          </td>
+          <td style="padding: 0.6rem 1rem; color: var(--text-muted); font-size: 0.85rem;">
+            ${escapeHtml(modTimeStr)}
+          </td>
+          <td style="padding: 0.6rem 1rem; text-align: right; white-space: nowrap;">
+            <div style="display: inline-flex; gap: 0.4rem; align-items: center;">
+              <button type="button" class="btn btn-secondary nas-nav-link" data-path="${escapeHtml(dir.relative_path)}" style="padding: 0.25rem 0.6rem; font-size: 0.8rem;">
+                Browse &rarr;
+              </button>
+              <a href="/dashboard/projects/new?path=${encodeURIComponent(dir.relative_path)}&name=${encodeURIComponent(dir.name)}" class="btn btn-primary" style="padding: 0.25rem 0.75rem; font-size: 0.8rem; font-weight: 600; text-decoration: none;">
+                ➕ Create Project
+              </a>
+            </div>
+          </td>
+        </tr>
+      `;
+    });
+
+    // Render image summary row if image files are present
+    if (data.images_count > 0) {
+      const folderName = currentNasPath.split("/").filter(Boolean).pop() || "dataset_root";
+      rowsHtml += `
+        <tr style="background: #f0fdf4; border-bottom: 1px solid #86efac;">
+          <td colspan="2" style="padding: 0.6rem 1rem; color: #166534; font-size: 0.88rem; font-weight: 500;">
+            🖼️ <strong>${data.images_count} image file(s)</strong> found directly in this directory
+          </td>
+          <td style="padding: 0.6rem 1rem; text-align: right; white-space: nowrap;">
+            <a href="/dashboard/projects/new?path=${encodeURIComponent(currentNasPath)}&name=${encodeURIComponent(folderName)}" class="btn btn-primary" style="padding: 0.3rem 0.85rem; font-size: 0.82rem; font-weight: 600; text-decoration: none;">
+              ➕ Create Project Here
+            </a>
+          </td>
+        </tr>
+      `;
+    }
+
+    listEl.innerHTML = rowsHtml;
+
+  } catch (err) {
+    if (bannerEl) {
+      bannerEl.style.display = "block";
+      bannerEl.style.background = "#fee2e2";
+      bannerEl.style.color = "#991b1b";
+      bannerEl.innerHTML = `⚠️ Error fetching NAS directories: ${escapeHtml(err.message)}`;
+    }
+    listEl.innerHTML = `<tr><td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">Failed to communicate with controller.</td></tr>`;
+  }
+}
+
+async function testNasConnection() {
+  const bannerEl = document.getElementById("nas-connection-banner");
+  if (!bannerEl) return;
+
+  bannerEl.style.display = "block";
+  bannerEl.dataset.persistent = "true";
+  bannerEl.style.background = "var(--bg-hover)";
+  bannerEl.style.color = "var(--text-color)";
+  bannerEl.style.border = "1px solid var(--border-color)";
+  bannerEl.innerHTML = "⏳ Testing reachability to NAS storage remote...";
+
+  try {
+    const res = await fetch("/api/v1/nas/test", { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.connected) {
+      bannerEl.style.background = "#dcfce7";
+      bannerEl.style.color = "#166534";
+      bannerEl.style.border = "1px solid #86efac";
+      bannerEl.innerHTML = `✅ <strong>Connected:</strong> NAS remote <code>${escapeHtml(data.remote)}</code> is online and reachable (${escapeHtml(data.target || '')}).`;
+      loadNasPath(currentNasPath);
+    } else {
+      bannerEl.style.background = "#fee2e2";
+      bannerEl.style.color = "#991b1b";
+      bannerEl.style.border = "1px solid #f87171";
+      bannerEl.innerHTML = `❌ <strong>Connection Notice:</strong> ${escapeHtml(data.error || data.detail || 'Could not connect to NAS remote.')}<br><small>Verify <code>NAS_HOST</code>, <code>NAS_PORT</code>, <code>NAS_USER</code>, and <code>NAS_PASSWORD</code> in <code>.env</code>.</small>`;
+    }
+  } catch (err) {
+    bannerEl.style.background = "#fee2e2";
+    bannerEl.style.color = "#991b1b";
+    bannerEl.innerHTML = `❌ Network Error: ${escapeHtml(err.message)}`;
+  }
+}
+
+// Event Delegation for Table and Breadcrumb Navigation
+document.addEventListener("DOMContentLoaded", () => {
+  const listEl = document.getElementById("nas-file-list");
+  const breadcrumbEl = document.getElementById("nas-breadcrumbs");
+  const btnTest = document.getElementById("btn-test-nas");
+  const btnRefresh = document.getElementById("btn-refresh-nas");
+  const btnCreateCurrent = document.getElementById("btn-create-project-current");
+  const pathInputBox = document.getElementById("nas-path-input");
+  const btnGoPath = document.getElementById("btn-go-path");
+
+  function navigateToInputPath() {
+    let p = pathInputBox ? pathInputBox.value.trim() : "";
+    if (p.startsWith("sftp://") || p.startsWith("smb://") || p.startsWith("http://") || p.startsWith("https://")) {
+      try {
+        const u = new URL(p);
+        p = u.pathname.replace(/^\/+/, "");
+      } catch (e) {
+        p = p.replace(/^[a-z]+:\/\/[^\/]+\//i, "");
+      }
+    }
+    loadNasPath(p);
+  }
+
+  if (btnGoPath) {
+    btnGoPath.addEventListener("click", navigateToInputPath);
+  }
+  if (pathInputBox) {
+    pathInputBox.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        navigateToInputPath();
+      }
+    });
+  }
+
+  if (btnTest) {
+    btnTest.addEventListener("click", testNasConnection);
+  }
+  if (btnRefresh) {
+    btnRefresh.addEventListener("click", () => loadNasPath(currentNasPath));
+  }
+  if (btnCreateCurrent) {
+    btnCreateCurrent.addEventListener("click", () => {
+      const folderName = currentNasPath.split("/").filter(Boolean).pop() || "project";
+      window.location.href = `/dashboard/projects/new?path=${encodeURIComponent(currentNasPath)}&name=${encodeURIComponent(folderName)}`;
+    });
+  }
+
+  if (listEl) {
+    listEl.addEventListener("click", (e) => {
+      const navLink = e.target.closest(".nas-nav-link");
+      if (navLink) {
+        e.preventDefault();
+        loadNasPath(navLink.dataset.path);
+        return;
+      }
+      const selectBtn = e.target.closest(".nas-select-btn");
+      if (selectBtn) {
+        e.preventDefault();
+        selectDirectoryForDataset(selectBtn.dataset.name, selectBtn.dataset.path);
+        return;
+      }
+    });
+  }
+
+  if (breadcrumbEl) {
+    breadcrumbEl.addEventListener("click", (e) => {
+      const crumbLink = e.target.closest(".nas-crumb-link");
+      if (crumbLink) {
+        e.preventDefault();
+        loadNasPath(crumbLink.dataset.path);
+        return;
+      }
+    });
+  }
+
+  // Auto-clean pasted SFTP URLs in the manual input field
+  const pathInput = document.getElementById("remote_path");
+  const nameInput = document.getElementById("dataset_name");
+  if (pathInput) {
+    pathInput.addEventListener("input", () => {
+      let val = pathInput.value.trim();
+      if (val.startsWith("sftp://") || val.startsWith("smb://") || val.startsWith("http://") || val.startsWith("https://")) {
+        try {
+          // Extract pathname from full URL
+          const url = new URL(val);
+          val = url.pathname.replace(/^\/+/, "");
+          pathInput.value = val;
+        } catch (e) {
+          // Regex fallback if URL constructor fails
+          val = val.replace(/^[a-z]+:\/\/[^\/]+\//i, "");
+          pathInput.value = val;
+        }
+      }
+      if (nameInput && (!nameInput.value || nameInput.value === "dataset")) {
+        const parts = val.split("/").filter(Boolean);
+        if (parts.length > 0) {
+          nameInput.value = parts[parts.length - 1].replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+        }
+      }
+    });
+  }
+
+  // Load initial path
+  loadNasPath(currentNasPath);
+});
+</script>
+{% endif %}
+{% endblock %}

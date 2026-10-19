@@ -1,0 +1,481 @@
+{% extends "base.html" %}
+{% block title %}Create New Project - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1.75rem;">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem;">
+    <div>
+      <h2>Create New Project</h2>
+      <p style="color: var(--text-muted); font-size: 0.95rem; margin-bottom: 0;">
+        Projects act as folders organizing NAS image catalogs and their associated team assignments.
+      </p>
+    </div>
+    <div style="display: flex; gap: 0.5rem;">
+      <a href="/dashboard/datasets" class="btn btn-secondary">🔍 Browse NAS Explorer</a>
+      <a href="/dashboard" class="btn btn-secondary">← Back to Dashboard</a>
+    </div>
+  </div>
+</div>
+
+{% if error %}
+<div class="alert alert-danger" style="margin-bottom: 1.5rem;">
+  ⚠️ <strong>Error:</strong> {{ error }}
+</div>
+{% endif %}
+
+<!-- Selected Folder Status Banner -->
+<div class="folder-picker-banner" id="selected-folder-banner" {% if not prefilled_path %}style="display: none;"{% endif %}>
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem;">
+    <div>
+      <span style="font-size: 0.8rem; text-transform: uppercase; font-weight: 700; color: #166534; letter-spacing: 0.05em;">
+        ✅ Selected NAS Target Folder
+      </span>
+      <div style="font-size: 1.15rem; font-weight: 600; color: #14532d; font-family: monospace; margin-top: 0.2rem;">
+        📁 {{ default_remote }}:<span id="selected-folder-text">{{ prefilled_path }}</span>
+      </div>
+    </div>
+    <a href="#nas-picker-card" class="btn btn-secondary" style="font-size: 0.82rem; padding: 0.35rem 0.75rem;">
+      Change Folder Below &darr;
+    </a>
+  </div>
+</div>
+
+{% if not prefilled_path %}
+<div class="card" style="background: #eff6ff; border: 1.5px solid #93c5fd; padding: 1rem 1.25rem; margin-bottom: 1.5rem;" id="no-folder-selected-notice">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem;">
+    <div>
+      <span style="font-size: 0.8rem; text-transform: uppercase; font-weight: 700; color: #1e40af; letter-spacing: 0.05em;">👉 Step 1: Select Your Project Folder</span>
+      <p style="font-size: 0.92rem; color: #1e3a8a; margin: 0.25rem 0 0 0;">
+        Browse the NAS Storage below and click <strong>"📌 Select Folder"</strong> to choose your images. The path and project name will be filled automatically!
+      </p>
+    </div>
+    <a href="#nas-picker-card" class="btn btn-primary" style="font-size: 0.85rem; padding: 0.4rem 0.85rem; font-weight: 600;">
+      Browse NAS Folders &darr;
+    </a>
+  </div>
+</div>
+{% endif %}
+
+<!-- Project Details Form -->
+<div class="card" id="project-form-card" style="margin-bottom: 2rem;">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem;">
+    <h3 class="card-title" style="margin-bottom: 0;">Project Details</h3>
+    <span style="font-size: 0.82rem; color: var(--text-muted);">* Required fields</span>
+  </div>
+
+  <form method="POST" action="/dashboard/projects/new">
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.25rem;">
+      <div class="form-group">
+        <label for="project_title">Project Title *</label>
+        <input type="text" id="project_title" name="title" required value="{{ prefilled_title }}" placeholder="e.g. Traffic Sign Detection 2026" oninput="syncSlug(this.value)">
+        <small style="color: var(--text-muted); font-size: 0.8rem;">Display title shown across the dashboard.</small>
+      </div>
+
+      <div class="form-group">
+        <label for="project_name">Project Identifier (Slug) *</label>
+        <input type="text" id="project_name" name="name" required value="{{ prefilled_slug }}" placeholder="e.g. traffic_signs_2026">
+        <small style="color: var(--text-muted); font-size: 0.8rem;">Unique system identifier (letters, numbers, underscores).</small>
+      </div>
+
+      <div class="form-group">
+        <label for="assigned_under">Project Assigned Under *</label>
+        <input type="text" id="assigned_under" name="assigned_under" value="{{ current_user.username }}" required list="user-options" placeholder="e.g. Lead Annotator, Team, or Manager">
+        <datalist id="user-options">
+          {% for u in users %}
+            <option value="{{ u.username }}">{{ u.username }} ({{ u.role }})</option>
+          {% endfor %}
+        </datalist>
+        <small style="color: var(--text-muted); font-size: 0.8rem;">Manager or Supervisor accountable for this project.</small>
+      </div>
+
+      <div class="form-group">
+        <label for="project_status">Project Status</label>
+        <select id="project_status" name="project_status">
+          <option value="ACTIVE" selected>Active (Open for Assignments)</option>
+          <option value="IN_PROGRESS">In Progress</option>
+          <option value="PLANNING">Planning</option>
+          <option value="ON_HOLD">On Hold</option>
+          <option value="COMPLETED">Completed</option>
+        </select>
+        <small style="color: var(--text-muted); font-size: 0.8rem;">Current lifecycle stage of this project.</small>
+      </div>
+    </div>
+
+    <div class="form-group" style="margin-top: 1rem;">
+      <label for="project_description">Description / Guidelines</label>
+      <textarea id="project_description" name="description" rows="3" placeholder="Brief description of the dataset, classes to annotate, or instructions for the team..."></textarea>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 200px 1fr; gap: 1rem; margin-top: 1rem;">
+      <div class="form-group">
+        <label for="remote_name">Rclone Remote</label>
+        <input type="text" id="remote_name" name="remote_name" required value="{{ default_remote }}">
+      </div>
+      <div class="form-group">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <label for="remote_path">NAS Folder Path *</label>
+          <span style="font-size: 0.8rem; color: var(--success); font-weight: 600;">
+            ⚡ Auto-synced with Live Explorer
+          </span>
+        </div>
+        <input type="text" id="remote_path" name="remote_path" required value="{{ prefilled_path }}" placeholder="Select from explorer below or type path" style="background-color: #ffffff; font-family: monospace; font-weight: 600;">
+        <small id="path-help-text" style="color: var(--text-muted); font-size: 0.8rem;">
+          💡 Automatically populated whenever you select or browse any folder in the Live NAS Explorer below.
+        </small>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; border-top: 1px solid var(--border); padding-top: 1.25rem; flex-wrap: wrap; gap: 0.75rem;">
+      <span style="font-size: 0.85rem; color: var(--text-muted);">
+        💡 Click <strong>"Create Project"</strong> to save and automatically begin cataloging image files.
+      </span>
+      <div style="display: flex; gap: 0.75rem;">
+        <a href="/dashboard" class="btn btn-secondary">Cancel</a>
+        <button type="submit" class="btn btn-primary" style="font-weight: 600; padding: 0.55rem 1.5rem;">
+          🚀 Create Project &amp; Initialize Folder
+        </button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<!-- Interactive NAS Directory Explorer to pick folders easily without manual typing -->
+<div class="card" id="nas-picker-card">
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+    <div>
+      <h3 class="card-title" style="margin-bottom: 0.2rem;">📁 Live NAS Storage Explorer</h3>
+      <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 0;">
+        Click <strong>"📌 Select Folder"</strong> on any row to link it directly to this project.
+      </p>
+    </div>
+    <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
+      <button id="btn-test-nas" type="button" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">
+        ⚡ Test NAS Connection
+      </button>
+      <button id="btn-refresh-nas" type="button" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">
+        🔄 Refresh
+      </button>
+      <button id="btn-select-current" type="button" class="btn btn-primary" style="font-size: 0.85rem; padding: 0.35rem 0.85rem; font-weight: 600;">
+        📌 Use Current Folder
+      </button>
+    </div>
+  </div>
+
+  <div id="nas-connection-banner" style="display: none; padding: 0.75rem 1rem; border-radius: 6px; margin-bottom: 1rem; font-size: 0.9rem;"></div>
+
+  <!-- Direct Path Search Bar -->
+  <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.75rem;">
+    <label for="nas-path-input" style="font-weight: 600; font-size: 0.85rem; white-space: nowrap; margin-bottom: 0;">Go to Path:</label>
+    <input type="text" id="nas-path-input" placeholder="Type or paste any NAS path e.g. ai_data_collection/test/images_yolo8" style="flex: 1; padding: 0.45rem 0.75rem; font-size: 0.85rem; font-family: monospace;">
+    <button id="btn-go-path" type="button" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.45rem 0.85rem;">
+      🔍 Open
+    </button>
+  </div>
+
+  <!-- Breadcrumbs -->
+  <div style="display: flex; align-items: center; gap: 0.5rem; background: #f1f5f9; padding: 0.6rem 0.85rem; border-radius: 6px; margin-bottom: 1rem; font-family: monospace; font-size: 0.9rem; overflow-x: auto;">
+    <span style="color: var(--primary); font-weight: bold;">{{ default_remote }}:</span>
+    <span id="nas-breadcrumbs"></span>
+  </div>
+
+  <!-- Folder Table -->
+  <div style="border: 1px solid var(--border); border-radius: 6px; max-height: 360px; overflow-y: auto;">
+    <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 0;">
+      <thead>
+        <tr style="position: sticky; top: 0; background: #f8fafc; z-index: 1;">
+          <th style="padding: 0.6rem 1rem; text-align: left; width: 50%;">Directory / Folder</th>
+          <th style="padding: 0.6rem 1rem; text-align: left; width: 22%;">Modified</th>
+          <th style="padding: 0.6rem 1rem; text-align: right; width: 28%;">Action</th>
+        </tr>
+      </thead>
+      <tbody id="nas-file-list">
+        <tr>
+          <td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">
+            Connecting to NAS...
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function syncSlug(val) {
+  const nameInput = document.getElementById("project_name");
+  if (!nameInput.dataset.manual) {
+    nameInput.value = val.toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+  }
+}
+
+document.getElementById("project_name")?.addEventListener("input", function() {
+  this.dataset.manual = "true";
+});
+
+document.getElementById("project_title")?.addEventListener("input", function() {
+  this.dataset.manual = "true";
+});
+
+function toggleManualPath() {
+  const pInput = document.getElementById("remote_path");
+  const link = document.getElementById("toggle-manual-path");
+  const help = document.getElementById("path-help-text");
+  if (pInput.hasAttribute("readonly")) {
+    pInput.removeAttribute("readonly");
+    pInput.style.backgroundColor = "#ffffff";
+    pInput.focus();
+    link.textContent = "🔒 Lock to auto-selected";
+    help.textContent = "Manual editing enabled. Type the relative folder path on NAS.";
+  } else {
+    pInput.setAttribute("readonly", "true");
+    pInput.style.backgroundColor = "#f8fafc";
+    link.textContent = "✏️ Edit path manually";
+    help.textContent = "🔒 Auto-filled from NAS folder explorer.";
+  }
+}
+
+function selectDirectoryForDataset(dirName, fullPath, shouldScroll = false) {
+  const titleInput = document.getElementById("project_title");
+  const nameInput = document.getElementById("project_name");
+  const pathInput = document.getElementById("remote_path");
+  const banner = document.getElementById("selected-folder-banner");
+  const bannerText = document.getElementById("selected-folder-text");
+  const notice = document.getElementById("no-folder-selected-notice");
+  const formCard = document.getElementById("project-form-card");
+
+  const effectivePath = fullPath !== undefined && fullPath !== null ? fullPath : "";
+  const rawName = (dirName || effectivePath.split("/").filter(Boolean).pop() || "project");
+  const cleanTitle = rawName.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  const cleanSlug = rawName.replace(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+
+  if (titleInput && (!titleInput.value || !titleInput.dataset.manual)) {
+    titleInput.value = cleanTitle;
+  }
+  if (nameInput && (!nameInput.value || !nameInput.dataset.manual)) {
+    nameInput.value = cleanSlug;
+  }
+  if (pathInput) {
+    pathInput.value = effectivePath;
+    pathInput.dispatchEvent(new Event("input", { bubbles: true }));
+    pathInput.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  if (banner && bannerText) {
+    banner.style.display = "block";
+    bannerText.textContent = effectivePath || "/";
+  }
+  if (notice) {
+    notice.style.display = "none";
+  }
+
+  if (shouldScroll && formCard) {
+    formCard.scrollIntoView({ behavior: "smooth" });
+    formCard.style.outline = "2px solid var(--primary)";
+    setTimeout(() => { formCard.style.outline = "none"; }, 1500);
+  }
+}
+
+let currentNasPath = {{ (prefilled_path or default_root_path)|tojson }};
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderBreadcrumbs(path) {
+  const el = document.getElementById("nas-breadcrumbs");
+  if (!el) return;
+  const isAbs = path.startsWith("/");
+  const segments = path.split("/").filter(Boolean);
+  let html = `<a href="javascript:void(0)" class="nas-crumb-link" data-path="${isAbs ? '/' : ''}" style="color: var(--primary); font-weight: bold;">[Root]</a>`;
+  let accum = "";
+  segments.forEach((seg, idx) => {
+    accum += (isAbs || idx > 0 ? "/" : "") + seg;
+    const target = accum;
+    html += ` / <a href="javascript:void(0)" class="nas-crumb-link" data-path="${escapeHtml(target)}" style="color: var(--primary); font-weight: 500;">${escapeHtml(seg)}</a>`;
+  });
+  el.innerHTML = html;
+}
+
+async function loadNasPath(path, autoSelect = true) {
+  const listEl = document.getElementById("nas-file-list");
+  const bannerEl = document.getElementById("nas-connection-banner");
+  if (!listEl) return;
+  currentNasPath = (path !== undefined && path !== null) ? path : "";
+  renderBreadcrumbs(currentNasPath);
+
+  const pathBox = document.getElementById("nas-path-input");
+  if (pathBox && document.activeElement !== pathBox) pathBox.value = currentNasPath;
+
+  // Automatically update the NAS Folder Path input field!
+  if (autoSelect) {
+    selectDirectoryForDataset("", currentNasPath, false);
+  }
+
+  listEl.innerHTML = `<tr><td colspan="3" style="text-align: center; padding: 1.2rem; color: var(--text-muted);">Fetching directories...</td></tr>`;
+
+  try {
+    const res = await fetch(`/api/v1/nas/browse?path=${encodeURIComponent(currentNasPath)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: "Network error" }));
+      if (bannerEl) {
+        bannerEl.style.display = "block";
+        bannerEl.style.background = "#fee2e2";
+        bannerEl.style.color = "#991b1b";
+        bannerEl.innerHTML = `⚠️ <strong>NAS Warning:</strong> ${escapeHtml(err.detail || 'Could not list directory.')}`;
+      }
+      listEl.innerHTML = `<tr><td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">Unable to load folder.</td></tr>`;
+      return;
+    }
+    const data = await res.json();
+    let rowsHtml = "";
+    if (data.parent_path !== null && data.parent_path !== undefined) {
+      rowsHtml += `
+        <tr style="background: var(--bg-hover);">
+          <td style="padding: 0.6rem 1rem;">
+            <a href="javascript:void(0)" class="nas-nav-link" data-path="${escapeHtml(data.parent_path)}" style="font-weight: bold; color: var(--primary);">
+              📁 .. (Go Up)
+            </a>
+          </td>
+          <td style="color: var(--text-muted); font-size: 0.85rem; padding: 0.6rem 1rem;">Parent Directory</td>
+          <td style="text-align: right; padding: 0.6rem 1rem;">-</td>
+        </tr>`;
+    }
+    const dirs = data.directories || [];
+    if (dirs.length === 0) {
+      rowsHtml += `<tr><td colspan="3" style="text-align: center; padding: 1.2rem; color: var(--text-muted);">No subdirectories found here. Current folder is selected.</td></tr>`;
+    } else {
+      dirs.forEach(d => {
+        const itemRel = d.relative_path || d.path || "";
+        const isCurrentSelected = (document.getElementById("remote_path")?.value === itemRel);
+        rowsHtml += `
+          <tr class="nas-folder-row" data-path="${escapeHtml(itemRel)}" data-name="${escapeHtml(d.name)}" style="border-bottom: 1px solid var(--border); cursor: pointer; ${isCurrentSelected ? 'background: #f0fdf4;' : ''}">
+            <td style="padding: 0.6rem 1rem;">
+              <a href="javascript:void(0)" class="nas-nav-link" data-path="${escapeHtml(itemRel)}" style="color: var(--primary); font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 0.35rem;">
+                📁 <span>${escapeHtml(d.name)}</span>/
+              </a>
+            </td>
+            <td style="color: var(--text-muted); font-size: 0.85rem; padding: 0.6rem 1rem;">${escapeHtml(d.mod_time ? d.mod_time.slice(0, 19).replace('T', ' ') : '-')}</td>
+            <td style="text-align: right; padding: 0.6rem 1rem; white-space: nowrap;">
+              <div style="display: inline-flex; gap: 0.35rem; align-items: center;">
+                <button type="button" class="btn btn-secondary nas-nav-link" data-path="${escapeHtml(itemRel)}" style="padding: 0.25rem 0.6rem; font-size: 0.8rem;">
+                  Browse &rarr;
+                </button>
+                <button type="button" class="btn btn-primary btn-select-dir" data-name="${escapeHtml(d.name)}" data-path="${escapeHtml(itemRel)}" style="padding: 0.25rem 0.75rem; font-size: 0.8rem; font-weight: 600;">
+                  📌 Select Folder
+                </button>
+              </div>
+            </td>
+          </tr>`;
+      });
+    }
+
+    if (data.images_count > 0) {
+      const folderName = currentNasPath.split("/").filter(Boolean).pop() || "project";
+      rowsHtml += `
+        <tr style="background: #f0fdf4; border-bottom: 1px solid #86efac;">
+          <td colspan="2" style="padding: 0.6rem 1rem; color: #166534; font-size: 0.88rem; font-weight: 500;">
+            🖼️ <strong>${data.images_count} image file(s)</strong> found directly in this directory
+          </td>
+          <td style="padding: 0.6rem 1rem; text-align: right; white-space: nowrap;">
+            <button type="button" class="btn btn-primary btn-select-dir" data-name="${escapeHtml(folderName)}" data-path="${escapeHtml(currentNasPath)}" style="padding: 0.25rem 0.75rem; font-size: 0.8rem; font-weight: 600;">
+              📌 Use This Folder
+            </button>
+          </td>
+        </tr>
+      `;
+    }
+
+    listEl.innerHTML = rowsHtml;
+  } catch (err) {
+    listEl.innerHTML = `<tr><td colspan="3" style="text-align: center; padding: 1.5rem; color: var(--text-muted);">Error: ${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  loadNasPath(currentNasPath, true);
+
+  document.addEventListener("click", (e) => {
+    const selectBtn = e.target.closest(".btn-select-dir");
+    if (selectBtn) {
+      e.preventDefault();
+      selectDirectoryForDataset(selectBtn.getAttribute("data-name"), selectBtn.getAttribute("data-path"), true);
+      return;
+    }
+
+    const navLink = e.target.closest(".nas-nav-link");
+    if (navLink) {
+      e.preventDefault();
+      const p = navLink.getAttribute("data-path");
+      selectDirectoryForDataset("", p, false);
+      loadNasPath(p, true);
+      return;
+    }
+
+    const crumbLink = e.target.closest(".nas-crumb-link");
+    if (crumbLink) {
+      e.preventDefault();
+      const p = crumbLink.getAttribute("data-path");
+      selectDirectoryForDataset("", p, false);
+      loadNasPath(p, true);
+      return;
+    }
+
+    const folderRow = e.target.closest(".nas-folder-row");
+    if (folderRow && !e.target.closest("button") && !e.target.closest("a")) {
+      const p = folderRow.getAttribute("data-path");
+      const n = folderRow.getAttribute("data-name");
+      selectDirectoryForDataset(n, p, false);
+      return;
+    }
+  });
+
+  document.getElementById("btn-go-path")?.addEventListener("click", () => {
+    const val = document.getElementById("nas-path-input").value.trim();
+    selectDirectoryForDataset("", val, false);
+    loadNasPath(val, true);
+  });
+
+  document.getElementById("btn-refresh-nas")?.addEventListener("click", () => {
+    loadNasPath(currentNasPath, true);
+  });
+
+  document.getElementById("btn-select-current")?.addEventListener("click", () => {
+    selectDirectoryForDataset("", currentNasPath, true);
+  });
+
+  document.getElementById("btn-test-nas")?.addEventListener("click", async () => {
+    const banner = document.getElementById("nas-connection-banner");
+    banner.style.display = "block";
+    banner.style.background = "#eff6ff";
+    banner.style.color = "#1e40af";
+    banner.style.border = "1px solid #93c5fd";
+    banner.innerHTML = "⏳ Testing NAS reachability...";
+    try {
+      const res = await fetch("/api/v1/nas/test", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.connected) {
+        banner.style.background = "#dcfce7";
+        banner.style.color = "#166534";
+        banner.style.border = "1px solid #86efac";
+        banner.innerHTML = `✅ <strong>NAS Connected:</strong> Remote <code>${escapeHtml(data.remote)}</code> is reachable (${escapeHtml(data.target || '')}).`;
+        loadNasPath(currentNasPath);
+      } else {
+        banner.style.background = "#fee2e2";
+        banner.style.color = "#991b1b";
+        banner.style.border = "1px solid #f87171";
+        banner.innerHTML = `⚠️ <strong>NAS Warning:</strong> ${escapeHtml(data.error || data.detail || 'Could not connect to NAS.')}`;
+      }
+    } catch (e) {
+      banner.style.background = "#fee2e2";
+      banner.style.color = "#991b1b";
+      banner.style.border = "1px solid #f87171";
+      banner.innerHTML = `❌ <strong>Connection Error:</strong> ${escapeHtml(e.message)}`;
+    }
+  });
+});
+</script>
+{% endblock %}

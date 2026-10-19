@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block title %}{{ dataset.title or dataset.name }} - Project Workspace{% endblock %}
+
+{% block content %}
+<div style="margin-bottom: 1.5rem;">
+  <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem;">
+    <div>
+      <a href="/dashboard" class="btn btn-secondary" style="font-size: 0.85rem; padding: 0.35rem 0.75rem;">&larr; Back to Dashboard</a>
+    </div>
+    <span style="font-size: 0.85rem; color: var(--text-muted);">
+      Project Workspace Overview
+    </span>
+  </div>
+</div>
+
+{% if notice %}
+<div class="card" style="background: #eff6ff; border: 1px solid #93c5fd; color: #1e40af; padding: 0.85rem 1.25rem; margin-bottom: 1.5rem; border-radius: 6px;">
+  ℹ️ <strong>Notice:</strong> {{ notice }}
+</div>
+{% endif %}
+
+{% if error %}
+<div class="card" style="background: #fef2f2; border: 1px solid #f87171; color: #991b1b; padding: 0.85rem 1.25rem; margin-bottom: 1.5rem; border-radius: 6px;">
+  ⚠️ <strong>Error:</strong> {{ error }}
+</div>
+{% endif %}
+
+<!-- Collapsible Project Container: Collapsed from start with ONLY Name and Progress with % visible -->
+<div class="project-folder" id="project-detail-container" style="border: 1.5px solid var(--border); border-radius: 8px; overflow: hidden; background: #ffffff; margin-bottom: 2rem;">
+  <!-- Collapsed Row: ONLY name of project and its progress bar with % -->
+  <div class="project-collapsed-row" onclick="toggleProjectDetailView()" style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 1.25rem; cursor: pointer; background: #ffffff; user-select: none; transition: background 0.15s ease;">
+    <div style="display: flex; align-items: center; gap: 0.75rem; flex: 1; min-width: 240px;">
+      <span id="detail-chevron" style="font-size: 0.9rem; color: var(--text-muted); transition: transform 0.2s ease;">▶</span>
+      <h2 style="font-size: 1.25rem; margin-bottom: 0; color: var(--text); font-weight: 700; display: inline-flex; align-items: center; gap: 0.5rem;">
+        📁 {{ dataset.title or dataset.name }}
+      </h2>
+    </div>
+
+    <!-- Progress bar with % -->
+    <div style="display: flex; align-items: center; gap: 1.25rem; min-width: 270px; justify-content: flex-end;">
+      <div style="width: 180px;">
+        <div style="display: flex; justify-content: space-between; font-size: 0.8rem; margin-bottom: 2px;">
+          <span style="color: var(--text-muted);">Progress</span>
+          <strong style="color: var(--text);">{{ progress_percent }}%</strong>
+        </div>
+        <div class="progress-container" style="height: 6px; margin-top: 0; background: #e2e8f0;">
+          <div class="progress-bar {% if progress_percent == 100 %}progress-bar-success{% endif %}" style="width: {{ progress_percent }}%;"></div>
+        </div>
+      </div>
+      <span id="detail-expand-label" style="font-size: 0.85rem; color: var(--primary); font-weight: 600;">
+        Expand Details ▾
+      </span>
+    </div>
+  </div>
+
+  <!-- Expanded Section: Visible only when expanded by user -->
+  <div id="detail-expanded-section" style="display: none; border-top: 1px solid var(--border); background: #f8fafc; padding: 1.5rem;">
+    <!-- Project Meta & Actions -->
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem;">
+      <div>
+        <div style="display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-bottom: 0.35rem;">
+          <span class="badge badge-{{ dataset.project_status.lower() if dataset.project_status else 'active' }}">{{ dataset.project_status or 'ACTIVE' }}</span>
+          <span class="badge badge-{{ dataset.catalog_state.lower() }}">{{ dataset.catalog_state }}</span>
+          <span style="font-size: 0.85rem; color: var(--text-muted);">Identifier: <code>{{ dataset.name }}</code></span>
+        </div>
+        <p style="color: var(--text-muted); font-size: 0.92rem; margin-bottom: 0.35rem;">
+          Remote Target: <code>{{ dataset.remote_name }}:{{ dataset.remote_path }}</code> |
+          👤 Assigned Under: <strong>{{ dataset.assigned_under or 'Unassigned' }}</strong>
+        </p>
+        {% if dataset.description %}
+          <p style="font-size: 0.9rem; color: var(--text); margin-top: 0.35rem; margin-bottom: 0;">
+            {{ dataset.description }}
+          </p>
+        {% endif %}
+      </div>
+      {% if current_user.role in ['ADMIN', 'MANAGER'] %}
+        <div style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+          <form method="POST" action="/dashboard/projects/{{ dataset.id }}/consolidate" style="margin: 0;">
+            <button type="submit" class="btn btn-secondary" title="Move all annotated and background images into the project root directory and purge completed assignment subdirectories">📦 Consolidate to Main Folder</button>
+          </form>
+          <button onclick="triggerScan({{ dataset.id }})" class="btn btn-secondary">🔄 Re-scan NAS</button>
+          {% if available_images > 0 %}
+            <a href="/dashboard/assignments?project_id={{ dataset.id }}#wizard" class="btn btn-primary">+ Create Assignment</a>
+          {% elif progress_percent == 100 %}
+            <span class="badge badge-completed" style="font-size: 0.85rem; padding: 0.45rem 0.85rem; font-weight: 600;">
+              ✅ All Images Completed
+            </span>
+          {% else %}
+            <span class="badge" style="background: #f1f5f9; color: #475569; font-size: 0.85rem; padding: 0.45rem 0.85rem; font-weight: 600; border: 1px solid var(--border);">
+              🔒 All Images Assigned (0 Available)
+            </span>
+          {% endif %}
+          <button onclick="confirmDeleteProject({{ dataset.id }}, '{{ dataset.title or dataset.name }}', {{ assignments|length }})" class="btn btn-secondary" style="color: var(--danger);" title="Delete Project">🗑️ Delete Project</button>
+        </div>
+      {% endif %}
+    </div>
+
+    <!-- Directory Hierarchy & File Inventory Table -->
+    <div class="card" style="background: #ffffff; margin-bottom: 1.5rem;">
+      <h3 class="card-title">Directory Hierarchy &amp; File Inventory</h3>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+        <strong>Direct Counts:</strong> files strictly within this immediate directory. <br>
+        <strong>Recursive Counts:</strong> all unique files including subdirectories.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Directory Path</th>
+            <th style="background-color: #e0f2fe; text-align: center;" colspan="4">Direct Counts</th>
+            <th style="background-color: #f0fdf4; text-align: center;" colspan="4">Recursive Counts</th>
+            <th>Action</th>
+          </tr>
+          <tr>
+            <th></th>
+            <th style="background-color: #e0f2fe; font-size: 0.8rem;">Images</th>
+            <th style="background-color: #e0f2fe; font-size: 0.8rem;">JSON</th>
+            <th style="background-color: #e0f2fe; font-size: 0.8rem;">TXT</th>
+            <th style="background-color: #e0f2fe; font-size: 0.8rem;">Other</th>
+            <th style="background-color: #f0fdf4; font-size: 0.8rem;">Images</th>
+            <th style="background-color: #f0fdf4; font-size: 0.8rem;">JSON</th>
+            <th style="background-color: #f0fdf4; font-size: 0.8rem;">TXT</th>
+            <th style="background-color: #f0fdf4; font-size: 0.8rem;">Other</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for d in directories %}
+            <tr>
+              <td><code>/{{ d.normalized_path }}</code></td>
+              <td style="background-color: #f8fafc; text-align: center; font-weight: 600;">{{ d.direct_image_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center;">{{ d.direct_json_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center;">{{ d.direct_txt_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center;">{{ d.direct_other_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center; font-weight: 700; color: var(--primary);">{{ d.recursive_image_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center;">{{ d.recursive_json_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center;">{{ d.recursive_txt_count }}</td>
+              <td style="background-color: #f8fafc; text-align: center;">{{ d.recursive_other_count }}</td>
+              <td>
+                {% if current_user.role in ['ADMIN', 'MANAGER'] and available_images > 0 %}
+                  <a href="/dashboard/assignments?dataset_id={{ dataset.id }}&scope={{ d.normalized_path }}#wizard" class="btn btn-primary" style="padding: 0.3rem 0.75rem; font-size: 0.82rem; font-weight: 600;">Assign</a>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr>
+              <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                No cataloged directories. Please trigger a scan to discover files.
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Assignments Under This Project Table -->
+    <div class="card" style="background: #ffffff; margin-bottom: 0;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+        <h3 class="card-title" style="margin-bottom: 0;">📋 Assignments Under This Project ({{ assignments|length }})</h3>
+        {% if current_user.role in ['ADMIN', 'MANAGER'] and available_images > 0 %}
+          <a href="/dashboard/assignments?project_id={{ dataset.id }}#wizard" class="btn btn-primary" style="font-size: 0.85rem; padding: 0.35rem 0.85rem;">
+            + Create Assignment
+          </a>
+        {% endif %}
+      </div>
+
+      {% if assignments %}
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Directory Scope</th>
+              <th>Annotator</th>
+              <th>Allocated</th>
+              <th>Status</th>
+              <th>Created</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for a in assignments %}
+              <tr>
+                <td>#{{ a.id }}</td>
+                <td><code>{{ a.directory_scope or '/' }} ({{ a.scope_type }})</code></td>
+                <td><strong>👤 {{ a.annotator.username }}</strong></td>
+                <td>{{ a.allocated_count }} images</td>
+                <td>
+                  {% if a.status == 'SUBMITTED_FOR_REVIEW' %}
+                    <span class="badge" style="background: #fef3c7; color: #b45309; font-weight: 700;">SUBMITTED (APPROVAL PENDING)</span>
+                  {% else %}
+                    <span class="badge badge-{{ a.status.lower() }}">{{ a.status }}</span>
+                  {% endif %}
+                </td>
+                <td>{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                <td>
+                  {% if a.status == 'SUBMITTED_FOR_REVIEW' and current_user.role in ['ADMIN', 'MANAGER'] %}
+                    <div style="display: inline-flex; gap: 0.35rem;">
+                      <form method="POST" action="/dashboard/assignments/{{ a.id }}/approve" style="display: inline; margin: 0;">
+                        <button type="submit" class="btn" style="padding: 0.2rem 0.5rem; font-size: 0.78rem; background: var(--success); color: #fff;">✅ Approve</button>
+                      </form>
+                      <button type="button" onclick="denyAssignmentDirect({{ a.id }})" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.78rem; color: var(--danger);">❌ Deny</button>
+                    </div>
+                  {% else %}
+                    <a href="/dashboard/assignments/{{ a.id }}" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.8rem;">View</a>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p style="text-align: center; color: var(--text-muted); padding: 1.5rem; margin-bottom: 0;">
+          No assignments created under this project yet. Click "+ Create Assignment" above to assign images to annotators.
+        </p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<form id="delete-project-form" method="POST" action="" style="display: none;"></form>
+
+<script>
+function toggleProjectDetailView() {
+  const sec = document.getElementById("detail-expanded-section");
+  const chevron = document.getElementById("detail-chevron");
+  const label = document.getElementById("detail-expand-label");
+  if (!sec) return;
+
+  const isHidden = sec.style.display === "none";
+  if (isHidden) {
+    sec.style.display = "block";
+    if (chevron) chevron.textContent = "▼";
+    if (label) label.textContent = "Collapse Details ▴";
+  } else {
+    sec.style.display = "none";
+    if (chevron) chevron.textContent = "▶";
+    if (label) label.textContent = "Expand Details ▾";
+  }
+}
+
+function confirmDeleteProject(id, title, assignmentCount) {
+  const warningText = assignmentCount > 0 
+    ? `⚠️ WARNING: This project has ${assignmentCount} assignment(s).\n\nDeleting project "${title}" will permanently delete the project and all of its ${assignmentCount} assignment(s), claims, and cataloged file entries.\n\nAre you sure you want to proceed?`
+    : `Are you sure you want to delete project "${title}"?\n\nThis will remove the project from the database.`;
+  
+  if (confirm(warningText)) {
+    const form = document.getElementById("delete-project-form");
+    form.action = `/dashboard/projects/${id}/delete`;
+    form.submit();
+  }
+}
+</script>
+{% endblock %}

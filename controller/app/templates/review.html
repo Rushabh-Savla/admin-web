@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Review Queue - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+  <h2>Manager Review Queue</h2>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Pending Background & Conflict Reviews</h3>
+  <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+    Decisions on intentional unannotated/negative images and remote conflict resolutions.
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Item ID</th>
+        <th>Assignment</th>
+        <th>Image Path</th>
+        <th>State</th>
+        <th>Notes / Reason</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in reviews %}
+        <tr>
+          <td>#{{ r.item_id }}</td>
+          <td><a href="/dashboard/assignments/{{ r.assignment_id }}">#{{ r.assignment_id }}</a></td>
+          <td><code>{{ r.file_path }}</code></td>
+          <td>
+            <span class="badge badge-{{ r.state.lower() }}">{{ r.state }}</span>
+          </td>
+          <td style="font-size: 0.85rem;">{{ r.error or 'Awaiting approval' }}</td>
+          <td>
+            {% if r.state == 'BACKGROUND_REVIEW' and current_user.role in ['ADMIN', 'MANAGER'] %}
+              <button onclick="approveBackgroundDecision({{ r.item_id }}, true)" class="btn" style="padding: 0.2rem 0.5rem; font-size: 0.8rem; background-color: var(--success);">Approve (Valid Negative)</button>
+              <button onclick="approveBackgroundDecision({{ r.item_id }}, false)" class="btn btn-secondary" style="padding: 0.2rem 0.5rem; font-size: 0.8rem;">Reject</button>
+            {% else %}
+              <span style="color: var(--text-muted); font-size: 0.8rem;">Requires Agent Re-sync</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="6" style="text-align: center; color: var(--text-muted);">
+            No items in the review queue. All annotations are verified!
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+

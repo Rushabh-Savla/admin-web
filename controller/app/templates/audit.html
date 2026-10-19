@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Audit Trail - Central Annotation Platform{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+  <h2>Security & Management Audit Trail</h2>
+</div>
+
+<div class="card">
+  <h3 class="card-title">Recent Audit Events</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Timestamp</th>
+        <th>User</th>
+        <th>Action</th>
+        <th>Resource</th>
+        <th>Details</th>
+        <th>IP Address</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for evt in events %}
+        <tr>
+          <td>{{ evt.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+          <td>{{ evt.user.username if evt.user else 'System' }}</td>
+          <td><code>{{ evt.action }}</code></td>
+          <td>{{ evt.resource_type }}:{{ evt.resource_id }}</td>
+          <td style="font-size: 0.8rem; max-width: 300px; word-break: break-all;">
+            {{ evt.details }}
+          </td>
+          <td><code>{{ evt.ip_address or '-' }}</code></td>
+        </tr>
+      {% else %}
+        <tr>
+          <td colspan="6" style="text-align: center; color: var(--text-muted);">No audit events recorded yet.</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
