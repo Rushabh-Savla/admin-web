@@ -319,13 +319,74 @@ mkdir -p secrets
 
 ---
 
-### Step 2 — Start the platform
+### Step 2 — Configure & Verify Rclone (NAS Storage)
+
+Before launching the Docker containers, configure how the background sync worker will communicate with your NAS storage.
+
+You have two options:
+
+#### Option A: Automatic Generation via `.env` (Fastest)
+1. Ensure the `secrets/` directory exists on the host:
+   ```bash
+   mkdir -p secrets
+   ```
+2. When Docker Compose starts, the `controller` automatically reads `NAS_STORAGE_TYPE`, `NAS_HOST`, `NAS_PORT`, `NAS_USER`, and `NAS_PASSWORD` from `.env`, generates `secrets/rclone.conf`, and secures it with `0600` permissions.
+
+#### Option B: Host Interactive Setup & Connectivity Verification (Recommended)
+Configuring and testing Rclone directly on your host machine before starting Docker guarantees that network routes, firewall ports, and credentials work properly:
+
+1. **Install Rclone on the host:**
+   ```bash
+   sudo apt update && sudo apt install -y rclone
+   ```
+
+2. **Run interactive setup:**
+   ```bash
+   rclone config
+   ```
+   - Remote Name: `annotation_nas` *(must match `DEFAULT_REMOTE_NAME` in `.env`)*
+   - Storage Type: `sftp` *(or `smb`, `webdav`, etc.)*
+   - Host, Port, User, and Password as prompted.
+
+3. **Verify connectivity directly before running Docker:**
+   ```bash
+   rclone lsd annotation_nas:
+   ```
+   *(Or test a specific folder: `rclone lsd annotation_nas:/data`)*.
+   If this lists directories without error, your NAS connection is working.
+
+4. **Copy the verified configuration into the project:**
+   ```bash
+   mkdir -p secrets
+   cp ~/.config/rclone/rclone.conf secrets/rclone.conf
+   chmod 600 secrets/rclone.conf
+   ```
+
+---
+
+### Step 3 — Start the platform with Docker Compose
+
+Once `.env` and `secrets/` are ready, start the services:
 
 ```bash
 cd web-app
 docker compose up -d
 ```
 *(or run `./run_web.sh`)*
+
+#### Verify Container Status:
+```bash
+docker compose ps
+```
+
+Expected healthy output:
+```text
+NAME                     SERVICE       STATUS                    PORTS
+annotation_controller    controller    Up (healthy)              0.0.0.0:8080->8000/tcp
+annotation_postgres      postgres      Up (healthy)              127.0.0.1:54321->5432/tcp
+annotation_sync_worker   sync_worker   Up                        8000/tcp
+annotation_migrate       migrate       Exited (0) [Completed]    
+```
 
 Open:
 - Web dashboard: http://localhost:8080/dashboard
@@ -337,51 +398,50 @@ Open:
 
 If you run `docker compose up -d` and see:
 ```text
-✘ Container annotation_migrate Error service "migrate" didn't complete successfully: exit 1
+[+] up 2/2
+ ✔ Container annotation_postgres Healthy                                      1.1s
+ ✘ Container annotation_migrate  Error service "migrate" didn't complete successfully: exit 1
 ```
 And `docker compose logs migrate` shows:
 ```text
-psycopg.OperationalError: connection failed: ... FATAL: password authentication failed for user "annotation_user"
+psycopg.OperationalError: connection failed: connection to server at "172.23.0.2", port 5432 failed: FATAL:  password authentication failed for user "annotation_user"
 ```
 
 #### Why does this happen?
-PostgreSQL stores database data in a persistent Docker named volume (`postgres_data`). When PostgreSQL starts up, if the volume already has an existing database, PostgreSQL logs:
-`PostgreSQL Database directory appears to contain a database; Skipping initialization`
-PostgreSQL **ignores** any new `POSTGRES_PASSWORD` from `.env` and retains the password that was set when the volume was initially created. When the `migrate` container runs `alembic upgrade head`, it attempts to connect using the new password from `.env`, resulting in an authentication mismatch.
+1. **PostgreSQL Volume Persistence:** The PostgreSQL Docker container only evaluates `POSTGRES_USER` and `POSTGRES_PASSWORD` when creating a brand-new database cluster. If the Docker volume (`postgres_data`) was initialized previously, PostgreSQL logs:
+   `PostgreSQL Database directory appears to contain a database; Skipping initialization`
+   and retains the password that was set when the volume was first created. Changing `POSTGRES_PASSWORD` or `DATABASE_URL` in `.env` afterwards does **not** automatically update the existing password stored in the volume.
+2. **Healthcheck False Positive:** The `annotation_postgres` container reports `Healthy` because its health check runs `pg_isready -U annotation_user -d annotation_db`, which checks if the PostgreSQL server is accepting socket connections without verifying passwords.
+3. **Migration Failure:** When `annotation_migrate` runs `alembic upgrade head`, it connects over the Docker bridge network using the new `DATABASE_URL` from `.env`. PostgreSQL rejects the password mismatch, causing `migrate` to exit with code 1 and preventing `controller` and `sync_worker` from starting.
 
 #### How to fix:
 
-- **Option A — Update the password in the existing database (Preserves existing data):**
-  If you have existing datasets or users you want to keep:
+- **Solution 1 — Update user password in the existing database (Preserves existing data):**
+  Run this command to synchronize PostgreSQL's internal password to match the `POSTGRES_PASSWORD` currently in your `.env` file:
   ```bash
-  # 1. Start postgres
-  docker compose up -d postgres
+  docker exec annotation_postgres psql -U annotation_user -d annotation_db -c "ALTER USER annotation_user WITH PASSWORD '<YOUR_POSTGRES_PASSWORD_FROM_ENV>';"
+  ```
+  *(Or via Docker Compose:* `docker compose exec postgres psql -U annotation_user -d annotation_db -c "ALTER USER annotation_user WITH PASSWORD '<YOUR_POSTGRES_PASSWORD_FROM_ENV>';"`*)*
 
-  # 2. Update the user password in PostgreSQL to match POSTGRES_PASSWORD from .env
-  docker compose exec postgres psql -U annotation_user -d annotation_db -c "ALTER USER annotation_user WITH PASSWORD '<YOUR_POSTGRES_PASSWORD>';"
-
-  # 3. Bring up the remaining containers
+  Then bring up the containers again:
+  ```bash
   docker compose up -d
   ```
+  The `migrate` container will now connect, run migrations, exit cleanly with code 0, and allow `controller` and `sync_worker` to start.
 
-- **Option B — Clean Reset (Recommended for fresh setup):**
-  If you do not need existing data and want a clean start with your new `.env` settings:
+- **Solution 2 — Clean Volume Reset (Recommended for fresh setup):**
+  If you do not have existing data you need to preserve and want a clean start with your new `.env` settings:
   ```bash
-  # 1. Stop containers and destroy the old database volume
+  # 1. Stop all containers and delete the old database volume
   docker compose down -v
 
-  # 2. Re-create containers cleanly
+  # 2. Re-create containers cleanly (PostgreSQL will initialize with your current .env password)
   docker compose up -d
   ```
-
-Check container health:
-```bash
-docker compose ps
-```
 
 ---
 
-### Step 3 — Create the first admin user
+### Step 4 — Create the first admin user
 
 Once the containers are running, create the first administrator account.
 
@@ -403,7 +463,7 @@ cd web-app
 docker compose exec controller python -m controller.app.cli create-user --username annotator1 --password 'StrongPass123' --role ANNOTATOR
 ```
 
-### Step 4 — Register a dataset
+### Step 5 — Register a dataset
 
 Use the dashboard or API to register a dataset with:
 
@@ -414,7 +474,7 @@ Use the dashboard or API to register a dataset with:
 
 This writes a row to `datasets` and prepares the system for a scan.
 
-### Step 5 — Scan the dataset catalog
+### Step 6 — Scan the dataset catalog
 
 Trigger a `CATALOG_SCAN` job. The sync worker reads the configured remote path, filters by supported extensions, and updates:
 
@@ -425,7 +485,7 @@ Trigger a `CATALOG_SCAN` job. The sync worker reads the configured remote path, 
 
 At this point, the platform knows what images are available and what is eligible for assignment.
 
-### Step 6 — Create an assignment
+### Step 7 — Create an assignment
 
 A manager or admin creates an assignment by choosing:
 
@@ -438,13 +498,13 @@ A manager or admin creates an assignment by choosing:
 
 The assignment creation service picks eligible files, creates `assignment_items`, and updates assignment status and lease metadata.
 
-### Step 7 — Prepare workspace and claim images
+### Step 8 — Prepare workspace and claim images
 
 The worker prepares the staging workspace and creates the job payload for the assignment. Annotators work on the staged files, and `active_image_claims` ensures only one active owner exists per image globally.
 
 This prevents overlapping ownership and duplicate work across annotators.
 
-### Step 8 — Submit and validate output
+### Step 9 — Submit and validate output
 
 When an annotator submits work:
 
@@ -453,7 +513,7 @@ When an annotator submits work:
 - validation state is checked (`VALID`, `INVALID_SYNTAX`, `INVALID_SCHEMA`, `CONFLICT`),
 - the worker uploads verified output back to the NAS or configured workspace target.
 
-### Step 9 — Review and completion
+### Step 10 — Review and completion
 
 Managers/admins can review submission state, approve or reject declarations, and close assignments after validation. `audit_events` keeps a full operational record of who did what and when.
 
@@ -657,9 +717,20 @@ This README is intentionally written as a full project guide so reviewers can un
 ```bash
 cd web-app
 cp .env.example .env
-# edit .env and secrets/rclone.conf (generate keys as described in Step 1)
+# 1. Edit .env (generate keys and set passwords as described in Step 1)
+# 2. Prepare secrets directory
+mkdir -p secrets
+
+# 3. (Optional) Configure & verify rclone on host, or let controller auto-generate it from .env
+# cp ~/.config/rclone/rclone.conf secrets/rclone.conf && chmod 600 secrets/rclone.conf
+
+# 4. Start Docker Compose services
 docker compose up -d
 
+# NOTE: If annotation_migrate fails with password authentication error on an existing volume:
+# docker exec annotation_postgres psql -U annotation_user -d annotation_db -c "ALTER USER annotation_user WITH PASSWORD '<YOUR_POSTGRES_PASSWORD>';" && docker compose up -d
+
+# 5. Bootstrap admin user
 docker compose exec controller python -m controller.app.cli create-admin --username admin --password 'Admin@123'
 ```
 
