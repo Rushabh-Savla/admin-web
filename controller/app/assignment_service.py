@@ -338,7 +338,7 @@ def restore_assignment_workspace(db: Session, assignment: Assignment) -> bool:
         except Exception as exc:
             logger.warning(f"Failed to purge assignment workspace {assignment.workspace_path} (continuing): {exc}")
 
-        # 3. Clean up empty annotator folder if empty
+        # 3. Clean up empty annotator folder if empty (remove without --leave-root so the annotator directory itself is deleted)
         try:
             annotator_parent = str(Path(assignment.workspace_path).parent.as_posix())
             if annotator_parent and annotator_parent != clean_remote_path:
@@ -346,11 +346,24 @@ def restore_assignment_workspace(db: Session, assignment: Assignment) -> bool:
                     settings.RCLONE_BIN,
                     "rmdirs",
                     f"{dataset.remote_name}:{annotator_parent}",
-                    "--leave-root",
                     "--config", config_path,
                     "--timeout", "30s",
                 ]
                 subprocess.run(rmdirs_cmd, capture_output=True, timeout=45)
+        except Exception:
+            pass
+
+        # 4. Sweep dataset directory for any remaining empty directories while leaving the dataset root intact
+        try:
+            sweep_cmd = [
+                settings.RCLONE_BIN,
+                "rmdirs",
+                f"{dataset.remote_name}:{clean_remote_path}",
+                "--leave-root",
+                "--config", config_path,
+                "--timeout", "30s",
+            ]
+            subprocess.run(sweep_cmd, capture_output=True, timeout=45)
         except Exception:
             pass
 
@@ -368,6 +381,10 @@ def restore_assignment_workspace(db: Session, assignment: Assignment) -> bool:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(f), str(target))
             shutil.rmtree(mock_base / assignment.workspace_path, ignore_errors=True)
+            # Remove empty annotator parent directory if no other assignments remain
+            annotator_parent_dir = (mock_base / assignment.workspace_path).parent
+            if annotator_parent_dir.exists() and not any(annotator_parent_dir.iterdir()):
+                annotator_parent_dir.rmdir()
         except Exception as e:
             logger.warning(f"Mock mode workspace restore note: {e}")
 
