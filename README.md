@@ -1,18 +1,5 @@
 # NAS Annotation Platform
 
-## Project Label
-**Project Name:** NAS Annotation Platform
-
-**GitHub Repository:** https://github.com/dhairyashil1012-ease/web-app
-
-**Description:** Centralized NAS-based annotation platform for dataset labeling, assignment tracking, validation workflows, and team review across internal deployment environments.
-
-This repository contains the central web platform, API layer, PostgreSQL-backed coordination service, and NAS sync worker used to manage image datasets, create annotation assignments, track ownership, validate submissions, and synchronize files between a NAS and local annotation workspaces.
-
-The system is designed around one core idea: the central application owns the authoritative dataset catalog and assignment state, while the background worker handles heavy operations such as remote catalog scans, workspace preparation, transfer verification, and upload work.
-
----
-
 ## 1. What this project does
 
 This platform is used to:
