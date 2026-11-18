@@ -257,6 +257,306 @@ def resume_assignment(db: Session, assignment_id: int, user_id: int) -> Assignme
     return assignment
 
 
+def restore_assignment_workspace(db: Session, assignment: Assignment) -> bool:
+    """
+    Restore all staged images from an assignment workspace back to the dataset's original root directory.
+    Purges the assignment workspace directory and manifest on the NAS, cleans up empty annotator directories,
+    and removes any local server controller caches.
+    """
+    if not assignment or not assignment.workspace_path:
+        return True
+
+    dataset = db.query(Dataset).filter(Dataset.id == assignment.dataset_id).first()
+    if not dataset:
+        return True
+
+    clean_remote_path = dataset.remote_path.strip("/")
+    rclone_cfg = Path(settings.RCLONE_CONFIG_PATH)
+    config_path = str(rclone_cfg)
+    try:
+        from controller.app.nas_service import resolve_rclone_config_path
+        config_path = resolve_rclone_config_path()
+    except Exception:
+        pass
+
+    import os
+    import shutil
+    is_real_rclone = dataset.remote_name and os.path.exists(config_path) and os.path.getsize(config_path) > 0
+
+    # Check if files in this assignment originally had an 'images/' prefix in normalized_path
+    sample_file = (
+        db.query(DatasetFile)
+        .join(AssignmentItem, AssignmentItem.file_id == DatasetFile.id)
+        .filter(AssignmentItem.assignment_id == assignment.id)
+        .first()
+    )
+    has_images_prefix = bool(sample_file and sample_file.normalized_path.startswith("images/"))
+    target_rel_path = f"{clean_remote_path}/images" if has_images_prefix else clean_remote_path
+
+    if is_real_rclone:
+        remote_ws_images = f"{dataset.remote_name}:{assignment.workspace_path}/images"
+        # Use _restore remote section to prevent Rclone's overlapping remotes restriction
+        restore_dest = f"{dataset.remote_name}_restore:{target_rel_path}"
+
+        # 1. Move all staged images back to the dataset's original directory structure
+        try:
+            cmd = [
+                settings.RCLONE_BIN,
+                "move",
+                remote_ws_images,
+                restore_dest,
+                "--config", config_path,
+                "--transfers", "4",
+                "--checkers", "4",
+                "--timeout", "180s",
+                "--contimeout", "10s",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+            if res.returncode == 0:
+                logger.info(f"Successfully consolidated/restored files for assignment {assignment.id} from {remote_ws_images} to {restore_dest}")
+            else:
+                err_str = (res.stderr or "").lower()
+                if "directory not found" in err_str or "not found" in err_str or "doesn't exist" in err_str:
+                    logger.info(f"Source workspace images folder {remote_ws_images} does not exist or was already consolidated.")
+                else:
+                    logger.warning(f"Rclone restore note for assignment {assignment.id} (code {res.returncode}): {res.stderr[:300]}")
+        except Exception as exc:
+            logger.warning(f"Exception restoring images for assignment {assignment.id} (continuing cleanup): {exc}")
+
+        # 2. Purge the assignment workspace directory (cleans up manifest.json, empty dirs)
+        try:
+            remote_ws_dir = f"{dataset.remote_name}:{assignment.workspace_path}"
+            purge_cmd = [
+                settings.RCLONE_BIN,
+                "purge",
+                remote_ws_dir,
+                "--config", config_path,
+                "--timeout", "60s",
+                "--contimeout", "10s",
+            ]
+            subprocess.run(purge_cmd, capture_output=True, timeout=90)
+        except Exception as exc:
+            logger.warning(f"Failed to purge assignment workspace {assignment.workspace_path} (continuing): {exc}")
+
+        # 3. Clean up empty annotator folder if empty (remove without --leave-root so the annotator directory itself is deleted)
+        try:
+            annotator_parent = str(Path(assignment.workspace_path).parent.as_posix())
+            if annotator_parent and annotator_parent != clean_remote_path:
+                rmdirs_cmd = [
+                    settings.RCLONE_BIN,
+                    "rmdirs",
+                    f"{dataset.remote_name}:{annotator_parent}",
+                    "--config", config_path,
+                    "--timeout", "30s",
+                ]
+                subprocess.run(rmdirs_cmd, capture_output=True, timeout=45)
+        except Exception:
+            pass
+
+        # 4. Sweep dataset directory for any remaining empty directories while leaving the dataset root intact
+        try:
+            sweep_cmd = [
+                settings.RCLONE_BIN,
+                "rmdirs",
+                f"{dataset.remote_name}:{clean_remote_path}",
+                "--leave-root",
+                "--config", config_path,
+                "--timeout", "30s",
+            ]
+            subprocess.run(sweep_cmd, capture_output=True, timeout=45)
+        except Exception:
+            pass
+
+    else:
+        # Mock mode (/tmp/nas_annotation_mock)
+        try:
+            mock_base = Path(os.getenv("MOCK_NAS_DIR", "/tmp/nas_annotation_mock"))
+            ws_images = mock_base / assignment.workspace_path / "images"
+            dest_root = mock_base / target_rel_path
+            if ws_images.exists():
+                for f in ws_images.rglob("*"):
+                    if f.is_file():
+                        rel = f.relative_to(ws_images)
+                        target = dest_root / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(f), str(target))
+            shutil.rmtree(mock_base / assignment.workspace_path, ignore_errors=True)
+            # Remove empty annotator parent directory if no other assignments remain
+            annotator_parent_dir = (mock_base / assignment.workspace_path).parent
+            if annotator_parent_dir.exists() and not any(annotator_parent_dir.iterdir()):
+                annotator_parent_dir.rmdir()
+        except Exception as e:
+            logger.warning(f"Mock mode workspace restore note: {e}")
+
+    # 4. Clean up any local server cache
+    try:
+        cache_dir = Path(f"/tmp/nas_cache/assignment_{assignment.id}")
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+    # 5. Enqueue CATALOG_SCAN job to update file status in database
+    try:
+        from controller.app.models import SyncJob
+        existing_job = (
+            db.query(SyncJob)
+            .filter(
+                SyncJob.job_type == "CATALOG_SCAN",
+                SyncJob.status.in_(["QUEUED", "RUNNING", "RETRYING"]),
+            )
+            .all()
+        )
+        already_queued = any(isinstance(j.payload, dict) and j.payload.get("dataset_id") == dataset.id for j in existing_job)
+        if not already_queued:
+            scan_job = SyncJob(
+                job_type="CATALOG_SCAN",
+                status="QUEUED",
+                payload={"dataset_id": dataset.id},
+            )
+            db.add(scan_job)
+            db.flush()
+    except Exception as e:
+        logger.warning(f"Failed to queue catalog scan after workspace restore: {e}")
+
+    return True
+
+
+def consolidate_assignment_to_main_directory(db: Session, assignment: Assignment) -> bool:
+    """
+    Consolidate all annotated and non-annotated images along with sidecar JSON files
+    from an assignment workspace back into the main project directory on NAS.
+    Purges the assignment workspace and cleans up empty annotator folders.
+    """
+    return restore_assignment_workspace(db, assignment)
+
+
+def consolidate_dataset_completed_assignments(db: Session, dataset_id: int) -> dict:
+    """
+    Consolidate all completed assignments for a project back into its main directory.
+    Sweeps any remaining assignment subdirectories on storage and updates catalog.
+    """
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        return {"consolidated": 0, "status": "Dataset not found"}
+
+    completed_assignments = (
+        db.query(Assignment)
+        .filter(
+            Assignment.dataset_id == dataset_id,
+            Assignment.status == "COMPLETED",
+        )
+        .all()
+    )
+
+    consolidated_count = 0
+    for a in completed_assignments:
+        try:
+            consolidate_assignment_to_main_directory(db, a)
+            consolidated_count += 1
+        except Exception as e:
+            logger.warning(f"Error consolidating assignment {a.id}: {e}")
+
+    # Clean up empty parent directories on storage
+    clean_remote_path = dataset.remote_path.strip("/")
+    rclone_cfg = Path(settings.RCLONE_CONFIG_PATH)
+    config_path = str(rclone_cfg)
+    try:
+        from controller.app.nas_service import resolve_rclone_config_path
+        config_path = resolve_rclone_config_path()
+        subprocess.run([
+            settings.RCLONE_BIN, "rmdirs", f"{dataset.remote_name}:{clean_remote_path}",
+            "--leave-root", "--config", config_path, "--timeout", "30s"
+        ], capture_output=True, timeout=45)
+    except Exception:
+        pass
+
+    db.commit()
+    return {"consolidated": consolidated_count, "dataset_id": dataset_id, "status": "success"}
+
+
+def restore_and_cleanup_dataset(db: Session, dataset_id: int):
+    """
+    Called before a dataset (project) is deleted from the system.
+    Restores all staged images across all assignments back to the dataset's original root directory,
+    and removes all annotator assignment subdirectories from the storage.
+    Also sweeps any stranded assignment subdirectories on the NAS for this dataset.
+    Completely wrapped in safe try-except blocks so manual folder deletions or NAS errors never block project deletion.
+    """
+    dataset = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not dataset:
+        return
+
+    import json
+    import os
+    clean_remote_path = dataset.remote_path.strip("/")
+    rclone_cfg = Path(settings.RCLONE_CONFIG_PATH)
+    config_path = str(rclone_cfg)
+    try:
+        from controller.app.nas_service import resolve_rclone_config_path
+        config_path = resolve_rclone_config_path()
+    except Exception:
+        pass
+
+    try:
+        assignments = db.query(Assignment).filter(Assignment.dataset_id == dataset_id).all()
+        for a in assignments:
+            try:
+                restore_assignment_workspace(db, a)
+            except Exception as e:
+                logger.warning(f"Error restoring assignment {a.id}: {e}")
+    except Exception as e:
+        logger.warning(f"Error querying assignments for dataset {dataset_id}: {e}")
+
+    # General sweep: check if any stranded assignment subdirectories exist on NAS under this dataset path
+    is_real_rclone = dataset.remote_name and os.path.exists(config_path) and os.path.getsize(config_path) > 0
+    if is_real_rclone:
+        try:
+            list_cmd = [
+                settings.RCLONE_BIN,
+                "lsjson",
+                f"{dataset.remote_name}:{clean_remote_path}",
+                "-R",
+                "--dirs-only",
+                "--config", config_path,
+                "--timeout", "30s",
+            ]
+            l_proc = subprocess.run(list_cmd, capture_output=True, text=True, timeout=45)
+            if l_proc.returncode == 0:
+                dir_items = json.loads(l_proc.stdout or "[]")
+                assignment_dirs = [d["Path"] for d in dir_items if "/assignment_" in d["Path"] or d["Path"].startswith("assignment_")]
+                for ad in assignment_dirs:
+                    if ad.endswith("/images") or ad == "images":
+                        continue
+                    try:
+                        ws_img_remote = f"{dataset.remote_name}:{clean_remote_path}/{ad}/images"
+                        restore_dest = f"{dataset.remote_name}_restore:{clean_remote_path}"
+                        subprocess.run([
+                            settings.RCLONE_BIN, "move", ws_img_remote, restore_dest,
+                            "--config", config_path, "--transfers", "4", "--checkers", "4", "--timeout", "120s"
+                        ], capture_output=True, timeout=180)
+                    except Exception:
+                        pass
+
+                    try:
+                        subprocess.run([
+                            settings.RCLONE_BIN, "purge", f"{dataset.remote_name}:{clean_remote_path}/{ad}",
+                            "--config", config_path, "--timeout", "60s"
+                        ], capture_output=True, timeout=90)
+                    except Exception:
+                        pass
+
+                # Clean up empty parent directories
+                try:
+                    subprocess.run([
+                        settings.RCLONE_BIN, "rmdirs", f"{dataset.remote_name}:{clean_remote_path}",
+                        "--leave-root", "--config", config_path, "--timeout", "30s"
+                    ], capture_output=True, timeout=45)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Error sweeping stranded assignment folders on NAS: {e}")
+
+
 def cancel_assignment(db: Session, assignment_id: int, user_id: int) -> Assignment:
     """
     Cancel an assignment.
@@ -282,38 +582,10 @@ def cancel_assignment(db: Session, assignment_id: int, user_id: int) -> Assignme
     ).update({"item_state": "CANCELLED"})
 
     # Restore uncompleted staged images from workspace back to the dataset directory on NAS
-    if assignment.workspace_path:
-        dataset = db.query(Dataset).filter(Dataset.id == assignment.dataset_id).first()
-        rclone_cfg = Path(settings.RCLONE_CONFIG_PATH)
-        if dataset and rclone_cfg.exists() and rclone_cfg.stat().st_size > 0:
-            remote_ws_images = f"{dataset.remote_name}:{assignment.workspace_path}/images"
-            all_items = (
-                db.query(AssignmentItem, DatasetFile)
-                .join(DatasetFile, AssignmentItem.file_id == DatasetFile.id)
-                .filter(AssignmentItem.assignment_id == assignment.id)
-                .all()
-            )
-            has_images_prefix = all(f.normalized_path.startswith("images/") for _, f in all_items) if all_items else False
-            clean_remote_path = dataset.remote_path.strip("/")
-            restore_dest = f"{dataset.remote_name}:{clean_remote_path}" if has_images_prefix else f"{dataset.remote_name}:{clean_remote_path}/images"
-            try:
-                cmd = [
-                    settings.RCLONE_BIN,
-                    "move",
-                    remote_ws_images,
-                    restore_dest,
-                    "--config", settings.RCLONE_CONFIG_PATH,
-                    "--transfers", "16",
-                    "--checkers", "16",
-                    "--timeout", "120s",
-                ]
-                res = subprocess.run(cmd, capture_output=True, timeout=180)
-                if res.returncode == 0:
-                    logger.info(f"Restored images for cancelled assignment {assignment_id} to {restore_dest}")
-                else:
-                    logger.warning(f"Rclone restore note: {res.stderr}")
-            except Exception as e:
-                logger.warning(f"Failed to restore images on cancel: {e}")
+    try:
+        restore_assignment_workspace(db, assignment)
+    except Exception as e:
+        logger.warning(f"Error restoring workspace on cancel for assignment {assignment_id}: {e}")
 
     audit = AuditEvent(
         user_id=user_id,

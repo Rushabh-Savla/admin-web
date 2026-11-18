@@ -10,7 +10,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = '0002_approval_workflow_and_notifications'
+revision: str = '0002_approvals_notifications'
 down_revision: Union[str, None] = '0001_initial_schema'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

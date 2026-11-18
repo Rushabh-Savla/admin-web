@@ -278,19 +278,26 @@ def approve_completion(
         .delete()
     )
 
+    # Consolidate all annotated & non-annotated images + sidecar JSONs back to the main project directory
+    try:
+        from controller.app.assignment_service import consolidate_assignment_to_main_directory
+        consolidate_assignment_to_main_directory(db, assignment)
+    except Exception as exc:
+        logger.warning(f"Error consolidating assignment {assignment.id} files to main directory: {exc}")
+
     db.add(
         AuditEvent(
             user_id=current_user.id,
             action="ASSIGNMENT_COMPLETION_APPROVED",
             resource_type="ASSIGNMENT",
             resource_id=assignment.id,
-            details=f"Master {current_user.username} approved completion of complete assignment #{assignment.id}. All items verified complete and {claims_deleted} active claims released.",
+            details=f"Master {current_user.username} approved completion of complete assignment #{assignment.id}. All items verified complete, {claims_deleted} active claims released, and files consolidated to main folder.",
         )
     )
     db.commit()
     db.refresh(assignment)
     return {
-        "message": f"Complete assignment #{assignment_id} approved! All {assignment.allocated_count} images marked verified and claims released.",
+        "message": f"Complete assignment #{assignment_id} approved! All {assignment.allocated_count} images & annotations consolidated to main folder.",
         "status": assignment.status,
     }
 

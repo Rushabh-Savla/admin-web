@@ -194,9 +194,27 @@
             <!-- Actions on Project Folder -->
             <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
               {% if current_user.role in ['ADMIN', 'MANAGER'] %}
-                <a href="/dashboard/assignments?project_id={{ p.id }}#wizard" class="btn btn-primary" style="font-size: 0.82rem; padding: 0.4rem 0.85rem; font-weight: 600;">
-                  + Create Assignment
-                </a>
+                {% if p.status == 'SCANNING' %}
+                  <span class="badge" style="background: #fef3c7; color: #92400e; font-size: 0.82rem; padding: 0.4rem 0.85rem; font-weight: 600; border: 1px solid #fde68a;">
+                    ⏳ Scanning Catalog...
+                  </span>
+                {% elif p.available_images > 0 %}
+                  <a href="/dashboard/assignments?project_id={{ p.id }}#wizard" class="btn btn-primary" style="font-size: 0.82rem; padding: 0.4rem 0.85rem; font-weight: 600;">
+                    + Create Assignment
+                  </a>
+                {% elif p.total_images == 0 %}
+                  <span class="badge" style="background: #f1f5f9; color: #64748b; font-size: 0.82rem; padding: 0.4rem 0.85rem; font-weight: 600; border: 1px solid var(--border);">
+                    📁 No Images Found
+                  </span>
+                {% elif p.progress_percent == 100 %}
+                  <span class="badge badge-completed" style="font-size: 0.82rem; padding: 0.4rem 0.85rem; font-weight: 600;">
+                    ✅ All Images Completed
+                  </span>
+                {% else %}
+                  <span class="badge" style="background: #f1f5f9; color: #475569; font-size: 0.82rem; padding: 0.4rem 0.85rem; font-weight: 600; border: 1px solid var(--border);">
+                    🔒 All Images Assigned (0 Available)
+                  </span>
+                {% endif %}
               {% endif %}
               <a href="/dashboard/projects/{{ p.id }}" class="btn btn-secondary" style="font-size: 0.82rem; padding: 0.4rem 0.75rem;">
                 Explore Folder
@@ -212,12 +230,19 @@
                     📁 <span>Explore Files &amp; Subfolders</span>
                   </a>
                   {% if current_user.role in ['ADMIN', 'MANAGER'] %}
+                    <form method="POST" action="/dashboard/projects/{{ p.id }}/consolidate" style="margin: 0;">
+                      <button type="submit" class="dropdown-item" title="Move all annotated and background images into the project root directory and purge completed assignment subdirectories">
+                        📦 <span>Consolidate to Main Folder</span>
+                      </button>
+                    </form>
                     <button type="button" onclick="triggerScan({{ p.id }})" class="dropdown-item">
                       🔄 <span>Re-scan NAS Catalog</span>
                     </button>
-                    <a href="/dashboard/assignments?project_id={{ p.id }}#wizard" class="dropdown-item">
-                      ➕ <span>New Assignment</span>
-                    </a>
+                    {% if p.available_images > 0 %}
+                      <a href="/dashboard/assignments?project_id={{ p.id }}#wizard" class="dropdown-item">
+                        ➕ <span>New Assignment</span>
+                      </a>
+                    {% endif %}
                   {% endif %}
                   <button type="button" onclick="copyPath('{{ p.remote_name }}:{{ p.remote_path }}')" class="dropdown-item">
                     📋 <span>Copy NAS Target Path</span>
@@ -257,7 +282,7 @@
             <h4 style="margin-bottom: 0; font-size: 0.95rem; color: var(--text);">
               📋 Assignments in this Project ({{ p.assignments|length }})
             </h4>
-            {% if current_user.role in ['ADMIN', 'MANAGER'] %}
+            {% if current_user.role in ['ADMIN', 'MANAGER'] and p.available_images > 0 %}
               <a href="/dashboard/assignments?project_id={{ p.id }}#wizard" style="font-size: 0.82rem; color: var(--primary); text-decoration: none; font-weight: 500;">
                 + Add another assignment to this project &rarr;
               </a>
@@ -558,5 +583,12 @@ async function triggerScan(datasetId) {
     alert("Error: " + e.message);
   }
 }
+
+// Auto-refresh page every 2.5 seconds if any project is currently scanning
+{% if projects|selectattr('status', 'equalto', 'SCANNING')|list|length > 0 %}
+setTimeout(function() {
+  window.location.reload();
+}, 2500);
+{% endif %}
 </script>
 {% endblock %}

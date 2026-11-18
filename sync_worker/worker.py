@@ -18,7 +18,7 @@ from sync_worker.catalog_adapter import (
     calculate_catalog_version,
 )
 from sync_worker.staging import prepare_assignment_workspace
-from sync_worker.transfer import upload_and_verify_annotation
+from sync_worker.transfer import upload_and_verify_annotation, upload_and_verify_annotations_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("sync_worker")
@@ -124,6 +124,10 @@ def process_catalog_scan(db: Session, job: SyncJob, mock_base_dir: Optional[str]
         for f in db.query(DatasetFile).filter(DatasetFile.dataset_id == dataset.id).all()
     }
 
+    claimed_file_ids = {
+        c[0] for c in db.query(ActiveImageClaim.file_id).all()
+    }
+
     seen_paths = set()
     for entry in entries:
         seen_paths.add(entry.normalized_path)
@@ -134,6 +138,10 @@ def process_catalog_scan(db: Session, job: SyncJob, mock_base_dir: Optional[str]
             file_rec.fingerprint = entry.fingerprint
             file_rec.catalog_version = version
             file_rec.updated_at = now_utc
+            if file_rec.id in claimed_file_ids:
+                file_rec.file_state = "ASSIGNED"
+            elif file_rec.file_state in ["ASSIGNED", "MISSING"]:
+                file_rec.file_state = "ELIGIBLE"
         else:
             file_rec = DatasetFile(
                 dataset_id=dataset.id,
@@ -153,9 +161,6 @@ def process_catalog_scan(db: Session, job: SyncJob, mock_base_dir: Optional[str]
 
     # For files no longer present in root catalog scan:
     # Check if they are claimed/assigned in an active assignment
-    claimed_file_ids = {
-        c[0] for c in db.query(ActiveImageClaim.file_id).all()
-    }
     for path, f in existing_files.items():
         if path not in seen_paths:
             if f.id in claimed_file_ids:
@@ -181,9 +186,45 @@ def execute_job(db: Session, job: SyncJob, mock_base_dir: Optional[str] = None):
         elif job.job_type == "PREPARE_ASSIGNMENT":
             p = Path(mock_base_dir) if mock_base_dir else None
             prepare_assignment_workspace(db, job.payload["assignment_id"], mock_base_dir=p)
+        elif job.job_type == "BATCH_UPLOAD_ANNOTATIONS":
+            p = Path(mock_base_dir) if mock_base_dir else None
+            upload_and_verify_annotations_batch(db, job.payload.get("submission_ids", []), mock_base_dir=p)
         elif job.job_type == "UPLOAD_ANNOTATION":
             p = Path(mock_base_dir) if mock_base_dir else None
-            upload_and_verify_annotation(db, job.payload["submission_id"], mock_base_dir=p)
+            assign_id = job.payload.get("assignment_id")
+            sub_id = job.payload.get("submission_id")
+            sub_ids = [sub_id] if sub_id else []
+            bundled_jobs = []
+
+            if assign_id:
+                # Bundle any other queued/retrying UPLOAD_ANNOTATION jobs for the same assignment to minimize NAS I/O
+                other_jobs = (
+                    db.query(SyncJob)
+                    .filter(
+                        SyncJob.job_type == "UPLOAD_ANNOTATION",
+                        SyncJob.status.in_(["QUEUED", "RETRYING"]),
+                        SyncJob.id != job.id,
+                    )
+                    .all()
+                )
+                for oj in other_jobs:
+                    if isinstance(oj.payload, dict) and oj.payload.get("assignment_id") == assign_id:
+                        s_id = oj.payload.get("submission_id")
+                        if s_id:
+                            sub_ids.append(s_id)
+                            oj.status = "CLAIMED"
+                            bundled_jobs.append(oj)
+                if bundled_jobs:
+                    db.commit()
+
+            if len(sub_ids) > 1:
+                logger.info(f"Bundled {len(sub_ids)} pending upload jobs for assignment {assign_id} into 1 single batch transfer.")
+                upload_and_verify_annotations_batch(db, sub_ids, mock_base_dir=p)
+                for oj in bundled_jobs:
+                    oj.status = "COMPLETED"
+                    oj.error = None
+            else:
+                upload_and_verify_annotation(db, job.payload["submission_id"], mock_base_dir=p)
         elif job.job_type == "CLEANUP_EXPIRED":
             logger.info("Executed cleanup task.")
         else:

@@ -30,6 +30,7 @@ from controller.app.assignment_service import (
     pause_assignment,
     resume_assignment,
     cancel_assignment,
+    restore_and_cleanup_dataset,
 )
 from controller.app.config import settings
 
@@ -166,13 +167,22 @@ def overview_page(
             })
 
         pending_count = sum(1 for a in ds.assignments if a.status == "SUBMITTED_FOR_REVIEW")
+        is_fully_completed = bool(progress == 100 and ds_total > 0 and ds_available == 0)
+        proj_status = "COMPLETED" if is_fully_completed else (ds.project_status or "ACTIVE")
+        if is_fully_completed and ds.project_status != "COMPLETED":
+            try:
+                ds.project_status = "COMPLETED"
+                db.commit()
+            except Exception:
+                pass
+
         projects.append({
             "id": ds.id,
             "title": ds.title or ds.name.replace("_", " ").title(),
             "name": ds.name,
             "description": ds.description,
             "assigned_under": ds.assigned_under or "Unassigned",
-            "project_status": ds.project_status or "ACTIVE",
+            "project_status": proj_status,
             "remote_name": ds.remote_name,
             "remote_path": ds.remote_path,
             "total_images": ds_total,
@@ -443,7 +453,13 @@ def delete_project_action(
 
     title = proj.title or proj.name
     try:
-        # Cascade delete all related assignments, submissions, claims, items, files, directories, and sync jobs
+        # 1. Restore all staged images from annotator workspaces back to the original dataset directory structure on NAS
+        try:
+            restore_and_cleanup_dataset(db, dataset_id)
+        except Exception as r_err:
+            logger.warning(f"Note during dataset {dataset_id} restoration (proceeding with deletion): {r_err}")
+
+        # 2. Cascade delete all related assignments, submissions, claims, items, files, directories, and sync jobs
         assignments = db.query(Assignment).filter(Assignment.dataset_id == dataset_id).all()
         assignment_ids = [a.id for a in assignments]
         files = db.query(DatasetFile).filter(DatasetFile.dataset_id == dataset_id).all()
@@ -481,16 +497,23 @@ def delete_project_action(
             if isinstance(j.payload, dict) and j.payload.get("dataset_id") == dataset_id:
                 db.delete(j)
 
-        db.delete(proj)
+        try:
+            db.delete(proj)
+        except Exception:
+            db.query(Dataset).filter(Dataset.id == dataset_id).delete(synchronize_session=False)
 
-        audit = AuditEvent(
-            user_id=current_user.id,
-            action="PROJECT_DELETED",
-            resource_type="dataset",
-            resource_id=str(dataset_id),
-            details={"title": title, "name": proj.name},
-        )
-        db.add(audit)
+        try:
+            audit = AuditEvent(
+                user_id=current_user.id,
+                action="PROJECT_DELETED",
+                resource_type="dataset",
+                resource_id=str(dataset_id),
+                details={"title": title, "name": getattr(proj, "name", "dataset")},
+            )
+            db.add(audit)
+        except Exception:
+            pass
+
         db.commit()
 
         return RedirectResponse(
@@ -501,6 +524,36 @@ def delete_project_action(
         db.rollback()
         return RedirectResponse(
             url=f"/dashboard?error=Failed+to+delete+project:+{quote_plus(str(exc))}",
+            status_code=status.HTTP_302_FOUND,
+        )
+
+
+@router.post("/dashboard/projects/{dataset_id}/consolidate")
+@router.post("/dashboard/datasets/{dataset_id}/consolidate")
+def dashboard_consolidate_project(
+    dataset_id: int,
+    request: Request,
+    current_user: Optional[User] = Depends(get_current_user_optional),
+    db: Session = Depends(get_db),
+):
+    if not current_user or current_user.role not in ["ADMIN", "MANAGER"]:
+        return RedirectResponse(url="/dashboard/login")
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        return RedirectResponse(url="/dashboard?error=Project+not+found", status_code=status.HTTP_302_FOUND)
+
+    try:
+        from controller.app.assignment_service import consolidate_dataset_completed_assignments
+        res = consolidate_dataset_completed_assignments(db, dataset_id)
+        cnt = res.get("consolidated", 0)
+        return RedirectResponse(
+            url=f"/dashboard?notice=Successfully+consolidated+{cnt}+assignment+workspaces+into+the+main+folder.",
+            status_code=status.HTTP_302_FOUND,
+        )
+    except Exception as exc:
+        return RedirectResponse(
+            url=f"/dashboard?error=Error+consolidating+workspaces:+{quote_plus(str(exc))}",
             status_code=status.HTTP_302_FOUND,
         )
 
@@ -583,6 +636,23 @@ def assignments_page(
     target_project_id = project_id or dataset_id
     assignments = db.query(Assignment).order_by(Assignment.id.desc()).all()
     datasets = db.query(Dataset).order_by(Dataset.id.desc()).all()
+    for ds in datasets:
+        ds_tot = db.query(DatasetFile).filter(DatasetFile.dataset_id == ds.id, DatasetFile.category == "IMAGE").count()
+        ds_asg = (
+            db.query(func.count(ActiveImageClaim.file_id))
+            .join(DatasetFile, ActiveImageClaim.file_id == DatasetFile.id)
+            .filter(DatasetFile.dataset_id == ds.id)
+            .scalar() or 0
+        )
+        ds_cmp = (
+            db.query(func.count(AssignmentItem.id))
+            .join(DatasetFile, AssignmentItem.file_id == DatasetFile.id)
+            .filter(DatasetFile.dataset_id == ds.id, AssignmentItem.item_state.in_(["VERIFIED_COMPLETE", "UPLOAD_PENDING", "BACKGROUND_DECLARED", "BACKGROUND_REVIEW", "BACKGROUND_APPROVED"]))
+            .scalar() or 0
+        )
+        ds.available_images = max(0, ds_tot - ds_asg - ds_cmp)
+        ds.total_images = ds_tot
+
     annotators = db.query(User).filter(User.role == "ANNOTATOR", User.is_active.is_(True)).all()
 
     return templates.TemplateResponse(
@@ -900,18 +970,26 @@ def dashboard_approve_assignment(
         .filter(ActiveImageClaim.assignment_id == assignment.id)
         .delete()
     )
+
+    # Consolidate all annotated & non-annotated images + sidecar JSONs back to the main project directory
+    try:
+        from controller.app.assignment_service import consolidate_assignment_to_main_directory
+        consolidate_assignment_to_main_directory(db, assignment)
+    except Exception as exc:
+        logger.warning(f"Error consolidating assignment {assignment.id} files to main directory: {exc}")
+
     db.add(
         AuditEvent(
             user_id=current_user.id,
             action="ASSIGNMENT_COMPLETION_APPROVED",
             resource_type="ASSIGNMENT",
             resource_id=assignment.id,
-            details=f"Master {current_user.username} approved completion of complete assignment #{assignment.id}. All items verified complete and {claims_deleted} active claims released.",
+            details=f"Master {current_user.username} approved completion of complete assignment #{assignment.id}. All items verified complete, {claims_deleted} active claims released, and files consolidated to main folder.",
         )
     )
     db.commit()
     return RedirectResponse(
-        url=f"/dashboard?notice=Complete+Assignment+%23{assignment_id}+approved!+All+images+marked+verified+and+claims+released.",
+        url=f"/dashboard?notice=Complete+Assignment+%23{assignment_id}+approved!+All+images+and+annotations+consolidated+into+main+directory.",
         status_code=status.HTTP_302_FOUND,
     )
 

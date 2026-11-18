@@ -24,8 +24,8 @@
         <select id="wizard_dataset_id" name="dataset_id" required onchange="updateEligibleCount()">
           <option value="">-- Select Project --</option>
           {% for ds in datasets %}
-            <option value="{{ ds.id }}" {% if selected_dataset_id == ds.id %}selected{% endif %}>
-              📁 {{ ds.title or ds.name }} ({{ ds.name }})
+            <option value="{{ ds.id }}" {% if selected_dataset_id == ds.id %}selected{% endif %} {% if ds.available_images == 0 %}disabled style="color: #94a3b8;"{% endif %}>
+              📁 {{ ds.title or ds.name }} ({{ ds.name }}) &mdash; {% if ds.available_images == 0 %}Completed (0 available){% else %}{{ ds.available_images }} available{% endif %}
             </option>
           {% endfor %}
         </select>

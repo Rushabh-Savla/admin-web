@@ -197,6 +197,25 @@ class AnnotationSubmissionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class BulkAnnotationItem(BaseModel):
+    file_id: int
+    idempotency_key: str
+    content_hash: str
+    annotation_json: Dict[str, Any]
+
+
+class BulkAnnotationSubmissionRequest(BaseModel):
+    assignment_id: int
+    ownership_generation: int
+    items: List[BulkAnnotationItem]
+
+
+class BulkAnnotationSubmissionOut(BaseModel):
+    submitted_count: int
+    errors_count: int
+    validation_errors: List[Dict[str, Any]]
+
+
 class BackgroundDeclarationRequest(BaseModel):
     assignment_id: int
     file_id: int

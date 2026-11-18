@@ -41,8 +41,19 @@ async function updateEligibleCount() {
 
   try {
     const data = await apiCall(`/api/v1/datasets/${datasetId}/eligible-count?scope=${scope}&scope_type=${scopeType}`);
+    const submitBtn = document.querySelector("form[action*='assignments'] button[type='submit']");
+    const countInput = document.getElementById("requested_count");
     if (countDisplay) {
-      countDisplay.textContent = `${data.eligible_count} eligible images available`;
+      if (data.eligible_count === 0) {
+        countDisplay.innerHTML = `<span style="color: var(--danger); font-weight: 600;">⚠️ 0 eligible images available. All images are completed or assigned!</span>`;
+        if (submitBtn) submitBtn.disabled = true;
+      } else {
+        countDisplay.innerHTML = `<span style="color: var(--success); font-weight: 600;">✓ ${data.eligible_count} eligible images available to assign</span>`;
+        if (submitBtn) submitBtn.disabled = false;
+        if (countInput && parseInt(countInput.value) > data.eligible_count) {
+          countInput.value = data.eligible_count;
+        }
+      }
     }
   } catch (err) {
     if (countDisplay) countDisplay.textContent = "Error calculating count";
@@ -150,10 +161,14 @@ async function checkNasStatus() {
   }
 }
 
-// Initialize NAS monitoring on DOM load and poll every 30 seconds
+// Initialize NAS monitoring on DOM load and poll every 120 seconds (only when tab is active)
 document.addEventListener("DOMContentLoaded", () => {
   checkNasStatus();
-  setInterval(checkNasStatus, 30000);
+  setInterval(() => {
+    if (!document.hidden) {
+      checkNasStatus();
+    }
+  }, 120000);
   fetchNotifications();
   setInterval(fetchNotifications, 20000);
 });

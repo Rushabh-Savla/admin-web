@@ -18,6 +18,7 @@ from controller.app.models import (
 )
 from controller.app.schemas import DatasetCreate, DatasetOut, DatasetDirectoryOut
 from controller.app.dependencies import require_role
+from controller.app.assignment_service import restore_and_cleanup_dataset
 
 router = APIRouter(prefix="/api/v1/datasets", tags=["Datasets & Catalog"])
 
@@ -85,6 +86,13 @@ def delete_dataset(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
 
     title = ds.title or ds.name
+    # 1. Restore all staged images from annotator workspaces back to the original dataset directory structure on NAS
+    try:
+        restore_and_cleanup_dataset(db, dataset_id)
+    except Exception as r_err:
+        pass
+
+    # 2. Cascade delete all related assignments, submissions, claims, items, files, directories, and sync jobs
     assignments = db.query(Assignment).filter(Assignment.dataset_id == dataset_id).all()
     assignment_ids = [a.id for a in assignments]
     files = db.query(DatasetFile).filter(DatasetFile.dataset_id == dataset_id).all()
@@ -122,16 +130,23 @@ def delete_dataset(
         if isinstance(j.payload, dict) and j.payload.get("dataset_id") == dataset_id:
             db.delete(j)
 
-    db.delete(ds)
+    try:
+        db.delete(ds)
+    except Exception:
+        db.query(Dataset).filter(Dataset.id == dataset_id).delete(synchronize_session=False)
 
-    audit = AuditEvent(
-        user_id=current_user.id,
-        action="PROJECT_DELETED",
-        resource_type="dataset",
-        resource_id=str(dataset_id),
-        details={"title": title, "name": ds.name},
-    )
-    db.add(audit)
+    try:
+        audit = AuditEvent(
+            user_id=current_user.id,
+            action="PROJECT_DELETED",
+            resource_type="dataset",
+            resource_id=str(dataset_id),
+            details={"title": title, "name": getattr(ds, "name", "dataset")},
+        )
+        db.add(audit)
+    except Exception:
+        pass
+
     db.commit()
     return {"message": f"Project '{title}' and all associated assignments deleted successfully"}
 
@@ -213,4 +228,19 @@ def get_eligible_count(
 
     available_count = query.scalar() or 0
     return {"dataset_id": dataset_id, "scope": norm_scope, "scope_type": scope_type, "eligible_count": available_count}
+
+
+@router.post("/{dataset_id}/consolidate")
+def consolidate_dataset_workspaces(
+    dataset_id: int,
+    current_user: User = Depends(require_role(["ADMIN", "MANAGER"])),
+    db: Session = Depends(get_db),
+):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+
+    from controller.app.assignment_service import consolidate_dataset_completed_assignments
+    res = consolidate_dataset_completed_assignments(db, dataset_id)
+    return res
 

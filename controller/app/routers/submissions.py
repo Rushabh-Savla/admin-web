@@ -16,6 +16,8 @@ from controller.app.models import (
 from controller.app.schemas import (
     AnnotationSubmissionRequest,
     AnnotationSubmissionOut,
+    BulkAnnotationSubmissionRequest,
+    BulkAnnotationSubmissionOut,
     BackgroundDeclarationRequest,
     BulkBackgroundDeclarationRequest,
     BackgroundApprovalRequest,
@@ -104,6 +106,98 @@ def submit_annotation(
     db.commit()
     db.refresh(sub)
     return sub
+
+
+@router.post("/bulk", response_model=BulkAnnotationSubmissionOut)
+def submit_annotations_bulk(
+    req: BulkAnnotationSubmissionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    assignment = db.query(Assignment).filter(Assignment.id == req.assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
+
+    if current_user.role == "ANNOTATOR" and assignment.annotator_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot submit for another user's assignment")
+
+    if assignment.lease_generation != req.ownership_generation:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Stale lease generation {req.ownership_generation}; active generation is {assignment.lease_generation}",
+        )
+
+    # Pre-fetch items map
+    file_ids = [it.file_id for it in req.items]
+    items_map = {
+        item.file_id: item
+        for item in db.query(AssignmentItem)
+        .filter(
+            AssignmentItem.assignment_id == assignment.id,
+            AssignmentItem.file_id.in_(file_ids),
+        )
+        .all()
+    }
+
+    submitted_sub_ids = []
+    validation_errors = []
+
+    for item_data in req.items:
+        fid = item_data.file_id
+        item = items_map.get(fid)
+        if not item:
+            validation_errors.append({"file_id": fid, "error": "Image file is not part of this assignment"})
+            continue
+
+        existing = db.query(AnnotationSubmission).filter(AnnotationSubmission.idempotency_key == item_data.idempotency_key).first()
+        if existing:
+            submitted_sub_ids.append(existing.id)
+            continue
+
+        valid, err_msg = validate_xanylabeling_schema(item_data.annotation_json)
+        raw_json_str = json.dumps(item_data.annotation_json, indent=2)
+
+        if not valid:
+            item.item_state = "FAILED"
+            item.error = err_msg
+            validation_errors.append({"file_id": fid, "error": err_msg})
+            continue
+
+        sub = AnnotationSubmission(
+            assignment_id=assignment.id,
+            file_id=fid,
+            annotator_id=current_user.id,
+            ownership_generation=req.ownership_generation,
+            idempotency_key=item_data.idempotency_key,
+            content_hash=item_data.content_hash,
+            raw_content=raw_json_str,
+            validation_state="VALID",
+            error=None,
+        )
+        db.add(sub)
+        db.flush()
+
+        item.item_state = "UPLOAD_PENDING"
+        item.error = None
+        submitted_sub_ids.append(sub.id)
+
+    # Enqueue a SINGLE batch sync job to upload all JSON files to NAS in 1 shot!
+    if submitted_sub_ids:
+        batch_job = SyncJob(
+            job_type="BATCH_UPLOAD_ANNOTATIONS",
+            status="QUEUED",
+            payload={"assignment_id": assignment.id, "submission_ids": submitted_sub_ids},
+            idempotency_key=f"batch_sub_{assignment.id}_{submitted_sub_ids[0]}_{len(submitted_sub_ids)}",
+        )
+        db.add(batch_job)
+
+    db.commit()
+
+    return BulkAnnotationSubmissionOut(
+        submitted_count=len(submitted_sub_ids),
+        errors_count=len(validation_errors),
+        validation_errors=validation_errors,
+    )
 
 
 @router.post("/background")

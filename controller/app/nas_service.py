@@ -3,7 +3,7 @@ import time
 import subprocess
 import json
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from controller.app.config import settings
 
@@ -86,6 +86,13 @@ def sync_rclone_config_from_env():
     elif settings.NAS_STORAGE_TYPE == "local":
         lines.append("type = local")
 
+    # Add duplicate section name for restore operations to avoid Rclone overlapping remotes checks
+    remote_block = list(lines)
+    lines.append("")
+    lines.append(f"[{settings.DEFAULT_REMOTE_NAME}_restore]")
+    for l in remote_block[1:]:
+        lines.append(l)
+
     new_content = "\n".join(lines) + "\n"
 
     try:
@@ -110,11 +117,11 @@ def resolve_rclone_config_path() -> str:
 _nas_conn_cache: Dict[str, Any] = {"timestamp": 0.0, "result": None}
 
 
-def test_nas_connection(remote_name: Optional[str] = None, force: bool = False) -> Dict[str, Any]:
-    """Test connectivity to the configured NAS remote with 30s in-memory TTL caching to protect NAS from excessive traffic."""
+def test_nas_connection(remote_name: Optional[str] = None, force: bool = False, cache_ttl: float = 300.0) -> Dict[str, Any]:
+    """Test connectivity to the configured NAS remote with 300s in-memory TTL caching to protect NAS from excessive SSH/SFTP traffic."""
     global _nas_conn_cache
     now = time.time()
-    if not force and not remote_name and _nas_conn_cache["result"] is not None and (now - _nas_conn_cache["timestamp"] < 30.0):
+    if not force and not remote_name and _nas_conn_cache["result"] is not None and (now - _nas_conn_cache["timestamp"] < cache_ttl):
         return _nas_conn_cache["result"]
 
     sync_rclone_config_from_env()
@@ -274,9 +281,9 @@ def browse_nas_directories(
         parent_path = None
         norm_path = current_path.rstrip("/")
         if norm_path and norm_path != "/":
-            parent = str(PurePosixPath(norm_path).parent).replace("\\", "/")
+            parent = str(Path(norm_path).parent)
             # If path was absolute and parent became '.', fix to '/'
-            if is_absolute and (parent == "." or parent == "/"):
+            if is_absolute and parent == ".":
                 parent_path = "/"
             elif not is_absolute and parent == ".":
                 parent_path = ""
