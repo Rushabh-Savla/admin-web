@@ -161,14 +161,14 @@ async function checkNasStatus() {
   }
 }
 
-// Initialize NAS monitoring on DOM load and poll every 120 seconds (only when tab is active)
+// Initialize NAS monitoring on DOM load and poll every 300 seconds (only when tab is active)
 document.addEventListener("DOMContentLoaded", () => {
   checkNasStatus();
   setInterval(() => {
     if (!document.hidden) {
       checkNasStatus();
     }
-  }, 120000);
+  }, 300000);
   fetchNotifications();
   setInterval(fetchNotifications, 20000);
 });

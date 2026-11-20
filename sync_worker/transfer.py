@@ -247,6 +247,10 @@ def upload_and_verify_annotations_batch(
     # Staging directory for this batch
     cache_base = Path(os.getenv("CONTROLLER_CACHE_DIR", "/tmp/nas_cache"))
     batch_staging_dir = cache_base / f"assignment_{assignment.id}" / "staged_annotations"
+
+    # Rebuild staging from this batch's database submissions only.
+    # Prevent stale files from previous failed attempts being uploaded again.
+    shutil.rmtree(batch_staging_dir, ignore_errors=True)
     batch_staging_dir.mkdir(parents=True, exist_ok=True)
 
     expected_files: Dict[str, int] = {}
@@ -308,10 +312,10 @@ def upload_and_verify_annotations_batch(
             "copy",
             str(batch_staging_dir),
             remote_target,
-            "--transfers", "16",
-            "--checkers", "16",
-            "--timeout", "180s",
-            "--contimeout", "10s",
+            "--transfers", str(settings.RCLONE_TRANSFERS),
+            "--checkers", str(settings.RCLONE_CHECKERS),
+            "--timeout", settings.RCLONE_TIMEOUT,
+            "--contimeout", settings.RCLONE_CONNECT_TIMEOUT,
         ]
         if os.path.exists(config_path) and os.path.getsize(config_path) > 0:
             copy_cmd += ["--config", config_path]
@@ -320,22 +324,66 @@ def upload_and_verify_annotations_batch(
         if res.returncode != 0:
             raise RuntimeError(f"Rclone batch annotation copy failed (code {res.returncode}): {res.stderr[:500]}")
 
-        # Verification in 1 single recursive lsjson call
-        v_cmd = [
-            settings.RCLONE_BIN,
-            "lsjson",
-            remote_target,
-            "-R",
-            "--files-only",
-            "--timeout", "60s",
-            "--contimeout", "10s",
-        ]
-        if os.path.exists(config_path) and os.path.getsize(config_path) > 0:
-            v_cmd += ["--config", config_path]
+        # Verify only files belonging to this batch.
+        # One Rclone process replaces one process per JSON file.
+        import tempfile
 
-        vres = subprocess.run(v_cmd, capture_output=True, text=True, timeout=90)
-        if vres.returncode != 0:
-            logger.warning(f"Batch verification lsjson returned non-zero ({vres.returncode}), but copy succeeded.")
+        verify_manifest_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+
+                delete=False,
+            ) as manifest_file:
+
+                for relative_path in sorted(expected_files):
+                    if "\n" in relative_path or "\r" in relative_path:
+                        raise RuntimeError(
+                            "Annotation path contains an unsupported newline."
+                        )
+
+                    manifest_file.write(relative_path + "\n")
+
+                verify_manifest_path = manifest_file.name
+
+            verify_cmd = [
+                settings.RCLONE_BIN,
+                "check",
+                str(batch_staging_dir),
+                remote_target,
+                "--one-way",
+                "--size-only",
+                "--files-from-raw",
+                verify_manifest_path,
+                "--checkers",
+                str(settings.RCLONE_CHECKERS),
+                "--timeout",
+                settings.RCLONE_TIMEOUT,
+                "--contimeout",
+                settings.RCLONE_CONNECT_TIMEOUT,
+            ]
+
+            if os.path.exists(config_path) and os.path.getsize(config_path) > 0:
+                verify_cmd += ["--config", config_path]
+
+            verify_result = subprocess.run(
+                verify_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if verify_result.returncode != 0:
+                raise RuntimeError(
+                    "Batch annotation verification failed: "
+                    f"{(verify_result.stderr or verify_result.stdout)[:1000]}"
+                )
+
+        finally:
+            if verify_manifest_path:
+                Path(verify_manifest_path).unlink(missing_ok=True)
 
     # Clean up local staging directory
     shutil.rmtree(batch_staging_dir, ignore_errors=True)

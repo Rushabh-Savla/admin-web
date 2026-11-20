@@ -376,8 +376,21 @@ def approve_background(
         assignment = db.query(Assignment).filter(Assignment.id == item.assignment_id).first()
         if assignment:
             assignment.status = "COMPLETED"
-            from controller.app.models import ActiveImageClaim
-            db.query(ActiveImageClaim).filter(ActiveImageClaim.assignment_id == assignment.id).delete()
+            from controller.app.models import ActiveImageClaim, DatasetFile
+            file_ids = [
+                row.file_id
+                for row in db.query(ActiveImageClaim.file_id)
+                .filter(ActiveImageClaim.assignment_id == assignment.id)
+                .all()
+            ]
+            db.query(ActiveImageClaim).filter(ActiveImageClaim.assignment_id == assignment.id).delete(
+                synchronize_session=False
+            )
+            if file_ids:
+                db.query(DatasetFile).filter(DatasetFile.id.in_(file_ids)).update(
+                    {DatasetFile.file_state: "ASSIGNED"},
+                    synchronize_session=False,
+                )
 
     db.commit()
     return {"message": f"Background decision recorded: approved={req.approved}"}

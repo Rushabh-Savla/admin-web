@@ -1,0 +1,411 @@
+import hashlib
+import json
+import logging
+import os
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple, List
+from sqlalchemy.orm import Session
+from controller.app.models import (
+    Assignment,
+    AssignmentItem,
+    DatasetFile,
+    AnnotationSubmission,
+    ActiveImageClaim,
+    Dataset,
+)
+from controller.app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def validate_xanylabeling_schema(data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """
+    Validate that dictionary adheres to XAnyLabeling annotation JSON schema.
+    Must contain 'shapes' list, imagePath or valid keys, and preserved fields.
+    """
+    if not isinstance(data, dict):
+        return False, "Root annotation payload must be a JSON object"
+
+    if "shapes" not in data or not isinstance(data["shapes"], list):
+        return False, "Missing or invalid 'shapes' list in annotation JSON"
+
+    for idx, shape in enumerate(data["shapes"]):
+        if not isinstance(shape, dict):
+            return False, f"Shape at index {idx} is not an object"
+        if "label" not in shape or not isinstance(shape["label"], str):
+            return False, f"Shape at index {idx} is missing valid string 'label'"
+        if "points" not in shape or not isinstance(shape["points"], list):
+            return False, f"Shape at index {idx} is missing 'points' coordinate list"
+
+    return True, None
+
+
+def upload_and_verify_annotation(
+    db: Session,
+    submission_id: int,
+    mock_base_dir: Optional[Path] = None,
+) -> bool:
+    """
+    Process an annotation submission:
+    1. Verify ownership generation and lease.
+    2. Check for remote conflicts.
+    3. Write and verify upload on storage target.
+    4. Update item status to VERIFIED_COMPLETE.
+    5. Check if entire assignment is finished and mark COMPLETED.
+    """
+    sub = db.query(AnnotationSubmission).filter(AnnotationSubmission.id == submission_id).first()
+    if not sub:
+        raise ValueError(f"Submission {submission_id} not found")
+
+    assignment = db.query(Assignment).filter(Assignment.id == sub.assignment_id).first()
+    if not assignment:
+        raise ValueError("Assignment missing for submission")
+
+    if assignment.lease_generation != sub.ownership_generation:
+        sub.validation_state = "STALE_GENERATION"
+        sub.error = f"Submission ownership generation {sub.ownership_generation} does not match active lease {assignment.lease_generation}"
+        db.commit()
+        raise ValueError(sub.error)
+
+    item = (
+        db.query(AssignmentItem)
+        .filter(
+            AssignmentItem.assignment_id == assignment.id,
+            AssignmentItem.file_id == sub.file_id,
+        )
+        .first()
+    )
+    if not item:
+        raise ValueError("Assignment item missing")
+
+    file_record = db.query(DatasetFile).filter(DatasetFile.id == sub.file_id).first()
+    dataset = db.query(Dataset).filter(Dataset.id == assignment.dataset_id).first()
+    if not file_record or not dataset:
+        raise ValueError("File or Dataset record missing")
+
+    # Target path calculation
+    # e.g., image: folder/sub/img01.jpg -> json: folder/sub/img01.json
+    clean_subpath = file_record.normalized_path
+    if clean_subpath.startswith("images/"):
+        clean_subpath = clean_subpath[len("images/"):].lstrip("/")
+    image_p = Path(clean_subpath)
+    json_rel_path = image_p.with_suffix(".json").as_posix()
+
+    rclone_cfg = Path(settings.RCLONE_CONFIG_PATH)
+    is_mock = mock_base_dir is not None or not rclone_cfg.exists() or rclone_cfg.stat().st_size == 0
+
+    if settings.ANNOTATION_OUTPUT_POLICY == "SIDECAR_PUBLISH":
+        target_rel_dir = dataset.remote_path.strip("/")
+    else:
+        # Save JSON directly in images directory alongside the image files
+        target_rel_dir = f"{assignment.workspace_path}/images"
+
+    target_json_path = f"{target_rel_dir}/{json_rel_path}"
+
+    payload_bytes = sub.raw_content.encode("utf-8") if sub.raw_content else b"{}"
+    calc_hash = hashlib.sha256(payload_bytes).hexdigest()
+
+    if is_mock:
+        base_path = mock_base_dir if mock_base_dir else Path("/tmp/nas_annotation_mock")
+        final_file = (base_path / target_json_path).resolve()
+        final_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Conflict check if publishing to dataset root
+        if settings.ANNOTATION_OUTPUT_POLICY == "SIDECAR_PUBLISH" and final_file.exists():
+            existing_hash = hashlib.sha256(final_file.read_bytes()).hexdigest()
+            if existing_hash != calc_hash:
+                item.item_state = "CONFLICT"
+                item.error = "Remote sidecar annotation exists and has differing content"
+                sub.validation_state = "CONFLICT"
+                sub.error = item.error
+                db.commit()
+                return False
+
+        final_file.write_bytes(payload_bytes)
+
+        # Verify
+        if not final_file.exists() or final_file.stat().st_size != len(payload_bytes):
+            raise RuntimeError("Verification failed: written file size mismatch")
+
+    else:
+        # Real Rclone upload
+        import tempfile
+        with tempfile.NamedTemporaryFile("wb", delete=False) as tf:
+            tf.write(payload_bytes)
+            tmp_local = tf.name
+
+        try:
+            remote_target = f"{dataset.remote_name}:{target_json_path}"
+            copy_cmd = [
+                settings.RCLONE_BIN,
+                "copyto",
+                tmp_local,
+                remote_target,
+            ]
+            if settings.RCLONE_CONFIG_PATH and Path(settings.RCLONE_CONFIG_PATH).exists():
+                copy_cmd += ["--config", settings.RCLONE_CONFIG_PATH]
+
+            res = subprocess.run(copy_cmd, capture_output=True, text=True, timeout=120)
+            if res.returncode != 0:
+                raise RuntimeError(f"Rclone annotation upload failed: {res.stderr[:500]}")
+
+            # Verify existence and size via lsjson
+            v_cmd = [
+                settings.RCLONE_BIN,
+                "lsjson",
+                remote_target,
+            ]
+            if settings.RCLONE_CONFIG_PATH and Path(settings.RCLONE_CONFIG_PATH).exists():
+                v_cmd += ["--config", settings.RCLONE_CONFIG_PATH]
+
+            vres = subprocess.run(v_cmd, capture_output=True, text=True, timeout=60)
+            if vres.returncode != 0:
+                raise RuntimeError(f"Rclone verification failed: {vres.stderr[:500]}")
+
+            vdata = json.loads(vres.stdout or "[]")
+            if not vdata or int(vdata[0].get("Size", -1)) != len(payload_bytes):
+                raise RuntimeError("Uploaded annotation size mismatch on remote target")
+
+        finally:
+            Path(tmp_local).unlink(missing_ok=True)
+
+    # Mark item completed
+    item.item_state = "VERIFIED_COMPLETE"
+    item.error = None
+    sub.validation_state = "VALID"
+    sub.error = None
+    db.flush()
+
+    # Check if all items in assignment are completed
+    uncompleted_count = (
+        db.query(AssignmentItem)
+        .filter(
+            AssignmentItem.assignment_id == assignment.id,
+            AssignmentItem.item_state.in_(["PENDING", "DOWNLOADING", "ANNOTATING"]),
+        )
+        .count()
+    )
+
+    if uncompleted_count == 0 and assignment.status in ["IN_PROGRESS", "READY", "PREPARING"]:
+        assignment.status = "SUBMITTED_FOR_REVIEW"
+        logger.info(f"Assignment {assignment.id} fully uploaded & verified. Marked SUBMITTED_FOR_REVIEW awaiting master approval.")
+
+    db.commit()
+    return True
+
+
+def upload_and_verify_annotations_batch(
+    db: Session,
+    submission_ids: List[int],
+    mock_base_dir: Optional[Path] = None,
+) -> bool:
+    """
+    Process multiple annotation submissions in ONE single batch operation:
+    1. Collects all valid JSON files for the assignment.
+    2. Stages them in a local cache directory.
+    3. Executes ONE single Rclone copy command to the remote assignment images directory.
+    4. Executes ONE single Rclone lsjson check to verify all files at once.
+    5. Marks all items VERIFIED_COMPLETE in a single database transaction.
+    Reduces NAS operations from 2*N (e.g. 600 requests) to just 2 requests total!
+    """
+    if not submission_ids:
+        return True
+
+    subs = (
+        db.query(AnnotationSubmission)
+        .filter(AnnotationSubmission.id.in_(submission_ids))
+        .all()
+    )
+    if not subs:
+        return True
+
+    assignment_id = subs[0].assignment_id
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise ValueError(f"Assignment {assignment_id} missing")
+
+    dataset = db.query(Dataset).filter(Dataset.id == assignment.dataset_id).first()
+    if not dataset:
+        raise ValueError("Dataset missing")
+
+    file_ids = [s.file_id for s in subs]
+    files_map = {
+        f.id: f
+        for f in db.query(DatasetFile).filter(DatasetFile.id.in_(file_ids)).all()
+    }
+    items_map = {
+        it.file_id: it
+        for it in db.query(AssignmentItem).filter(
+            AssignmentItem.assignment_id == assignment.id,
+            AssignmentItem.file_id.in_(file_ids),
+        ).all()
+    }
+
+    # Staging directory for this batch
+    cache_base = Path(os.getenv("CONTROLLER_CACHE_DIR", "/tmp/nas_cache"))
+    batch_staging_dir = cache_base / f"assignment_{assignment.id}" / "staged_annotations"
+    batch_staging_dir.mkdir(parents=True, exist_ok=True)
+
+    expected_files: Dict[str, int] = {}
+    valid_subs = []
+
+    for sub in subs:
+        file_rec = files_map.get(sub.file_id)
+        item = items_map.get(sub.file_id)
+        if not file_rec or not item:
+            continue
+
+        if assignment.lease_generation != sub.ownership_generation:
+            sub.validation_state = "STALE_GENERATION"
+            sub.error = f"Stale lease generation {sub.ownership_generation}"
+            continue
+
+        clean_subpath = file_rec.normalized_path
+        if clean_subpath.startswith("images/"):
+            clean_subpath = clean_subpath[len("images/"):].lstrip("/")
+        json_rel_path = Path(clean_subpath).with_suffix(".json").as_posix()
+
+        local_file = batch_staging_dir / json_rel_path
+        local_file.parent.mkdir(parents=True, exist_ok=True)
+        payload_bytes = sub.raw_content.encode("utf-8") if sub.raw_content else b"{}"
+        local_file.write_bytes(payload_bytes)
+
+        expected_files[json_rel_path] = len(payload_bytes)
+        valid_subs.append((sub, item, json_rel_path))
+
+    if not valid_subs:
+        db.commit()
+        return True
+
+    rclone_cfg = Path(settings.RCLONE_CONFIG_PATH)
+    is_mock = mock_base_dir is not None or not rclone_cfg.exists() or rclone_cfg.stat().st_size == 0
+
+    if is_mock:
+        base_path = mock_base_dir if mock_base_dir else Path("/tmp/nas_annotation_mock")
+        ws_images = base_path / assignment.workspace_path / "images"
+        ws_images.mkdir(parents=True, exist_ok=True)
+        for sub, item, json_rel_path in valid_subs:
+            dst = ws_images / json_rel_path
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            src = batch_staging_dir / json_rel_path
+            shutil.copy2(str(src), str(dst))
+    else:
+        # Real Rclone: Single batch copy + single verify
+        config_path = str(rclone_cfg)
+        try:
+            from controller.app.nas_service import resolve_rclone_config_path
+            config_path = resolve_rclone_config_path()
+        except Exception:
+            pass
+
+        remote_target = f"{dataset.remote_name}:{assignment.workspace_path}/images"
+
+        copy_cmd = [
+            settings.RCLONE_BIN,
+            "copy",
+            str(batch_staging_dir),
+            remote_target,
+            "--transfers", str(settings.RCLONE_TRANSFERS),
+            "--checkers", str(settings.RCLONE_CHECKERS),
+            "--timeout", settings.RCLONE_TIMEOUT,
+            "--contimeout", settings.RCLONE_CONNECT_TIMEOUT,
+        ]
+        if os.path.exists(config_path) and os.path.getsize(config_path) > 0:
+            copy_cmd += ["--config", config_path]
+
+        res = subprocess.run(copy_cmd, capture_output=True, text=True, timeout=300)
+        if res.returncode != 0:
+            raise RuntimeError(f"Rclone batch annotation copy failed (code {res.returncode}): {res.stderr[:500]}")
+
+        # Verify only files belonging to this batch.
+        # One Rclone process replaces one process per JSON file.
+        import tempfile
+
+        verify_manifest_path = None
+
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\\n",
+                delete=False,
+            ) as manifest_file:
+
+                for relative_path in sorted(expected_files):
+                    if "\\n" in relative_path or "\\r" in relative_path:
+                        raise RuntimeError(
+                            "Annotation path contains an unsupported newline."
+                        )
+
+                    manifest_file.write(relative_path + "\\n")
+
+                verify_manifest_path = manifest_file.name
+
+            verify_cmd = [
+                settings.RCLONE_BIN,
+                "check",
+                str(batch_staging_dir),
+                remote_target,
+                "--one-way",
+                "--size-only",
+                "--files-from-raw",
+                verify_manifest_path,
+                "--checkers",
+                str(settings.RCLONE_CHECKERS),
+                "--timeout",
+                settings.RCLONE_TIMEOUT,
+                "--contimeout",
+                settings.RCLONE_CONNECT_TIMEOUT,
+            ]
+
+            if os.path.exists(config_path) and os.path.getsize(config_path) > 0:
+                verify_cmd += ["--config", config_path]
+
+            verify_result = subprocess.run(
+                verify_cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if verify_result.returncode != 0:
+                raise RuntimeError(
+                    "Batch annotation verification failed: "
+                    f"{(verify_result.stderr or verify_result.stdout)[:1000]}"
+                )
+
+        finally:
+            if verify_manifest_path:
+                Path(verify_manifest_path).unlink(missing_ok=True)
+
+    # Clean up local staging directory
+    shutil.rmtree(batch_staging_dir, ignore_errors=True)
+
+    # Update database items in one single commit
+    for sub, item, _ in valid_subs:
+        item.item_state = "VERIFIED_COMPLETE"
+        item.error = None
+        sub.validation_state = "VALID"
+        sub.error = None
+
+    db.flush()
+
+    # Check if assignment is ready for review
+    uncompleted_count = (
+        db.query(AssignmentItem)
+        .filter(
+            AssignmentItem.assignment_id == assignment.id,
+            AssignmentItem.item_state.in_(["PENDING", "DOWNLOADING", "ANNOTATING"]),
+        )
+        .count()
+    )
+    if uncompleted_count == 0 and assignment.status in ["IN_PROGRESS", "READY", "PREPARING"]:
+        assignment.status = "SUBMITTED_FOR_REVIEW"
+        logger.info(f"Assignment {assignment.id} fully uploaded & verified. Marked SUBMITTED_FOR_REVIEW awaiting master approval.")
+
+    db.commit()
+    logger.info(f"Batch upload completed successfully: {len(valid_subs)} annotations synced to {assignment.workspace_path}/images in 1 batch.")
+    return True

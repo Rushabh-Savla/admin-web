@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from controller.app.database import get_db
 from controller.app.models import (
     User,
@@ -38,6 +40,8 @@ templates_dir = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(templates_dir))
 
 router = APIRouter(include_in_schema=False)
+
+logger = logging.getLogger(__name__)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -842,9 +846,21 @@ def create_user_form(
     if not current_user or current_user.role not in ["ADMIN", "MANAGER"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN)
 
-    u = User(username=username.strip(), password_hash=hash_password(password), role=role)
+    normalized_username = username.strip()
+    if not normalized_username:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is required")
+
+    existing = db.query(User).filter(User.username == normalized_username).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Username '{normalized_username}' already exists")
+
+    u = User(username=normalized_username, password_hash=hash_password(password), role=role)
     db.add(u)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Username '{normalized_username}' already exists")
     return RedirectResponse(url="/dashboard/users", status_code=status.HTTP_302_FOUND)
 
 

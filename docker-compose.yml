@@ -65,6 +65,7 @@ services:
       - ./controller:/app/controller
       - ./sync_worker:/app/sync_worker
       - ./scripts:/app/scripts
+      - /srv/annotation-cache:/var/cache/annotation
     networks:
       - backend_net
     depends_on:
@@ -98,6 +99,7 @@ services:
       - ./controller:/app/controller
       - ./sync_worker:/app/sync_worker
       - ./scripts:/app/scripts
+      - /srv/annotation-cache:/var/cache/annotation
     networks:
       - backend_net
     depends_on:

@@ -118,10 +118,47 @@ def prepare_assignment_workspace(
         }
         (workspace_full / "manifest.json").write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
 
-        # Update assignment status
+        # Prefetch the exact assignment file set into the shared server SSD cache.
+        cache_base = Path(os.getenv("CONTROLLER_CACHE_DIR", "/tmp/nas_cache")).resolve()
+        cache_root = (cache_base / f"assignment_{assignment.id}").resolve()
+        cache_images = cache_root / "images"
+        cache_images.mkdir(parents=True, exist_ok=True)
+
+        cache_manifest_items = []
+        for item, file_record in items:
+            source = images_dir / file_record.normalized_path
+            destination = cache_images / file_record.normalized_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(source), str(destination))
+            actual_size = destination.stat().st_size
+            if actual_size != file_record.size:
+                raise RuntimeError(
+                    f"Cache verification size mismatch for {file_record.normalized_path}: "
+                    f"expected {file_record.size}, found {actual_size}"
+                )
+            cache_manifest_items.append({
+                "item_id": item.id,
+                "file_id": file_record.id,
+                "ordinal": item.ordinal,
+                "relative_path": file_record.normalized_path,
+                "size": actual_size,
+                "fingerprint": file_record.fingerprint,
+            })
+
+        cache_manifest = {
+            "assignment_id": assignment.id,
+            "catalog_version": assignment.catalog_version,
+            "annotator_id": annotator.id,
+            "dataset_id": dataset.id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "item_count": len(cache_manifest_items),
+            "items": cache_manifest_items,
+        }
+        _write_assignment_cache_manifest(cache_root, cache_manifest)
+        _write_ready_marker(cache_root)
+
         assignment.workspace_path = rel_workspace_dir
         assignment.status = "READY"
-        db.add(SyncJob(job_type="CATALOG_SCAN", status="QUEUED", payload={"dataset_id": dataset.id}))
         db.commit()
         logger.info(f"Assignment {assignment_id} successfully staged and marked READY (mock mode).")
         return True
@@ -135,85 +172,107 @@ def prepare_assignment_workspace(
         all_have_images_prefix = all(f.normalized_path.startswith("images/") for _, f in items)
         move_dest = remote_dest if all_have_images_prefix else f"{remote_dest}/images"
 
-        # 1. Prepare file list for Rclone files-from
+        manifest_items = [{
+            "item_id": item.id,
+            "file_id": file_record.id,
+            "ordinal": item.ordinal,
+            "relative_path": file_record.normalized_path,
+            "size": file_record.size,
+            "fingerprint": file_record.fingerprint,
+        } for item, file_record in items]
+
         import tempfile
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as tf:
             for _, file_record in items:
                 tf.write(file_record.normalized_path + "\n")
             list_file_path = tf.name
 
+        cache_base = Path(os.getenv("CONTROLLER_CACHE_DIR", "/tmp/nas_cache")).resolve()
+        cache_root = (cache_base / f"assignment_{assignment.id}").resolve()
+        cache_images = cache_root / "images"
+        cache_images.mkdir(parents=True, exist_ok=True)
+
         try:
-            # Check if destination files are already staged in {remote_dest}/images (idempotent retry guard)
-            v_cmd = [
+            # Move only the exact assignment file list into the NAS workspace.
+            move_cmd = [
                 settings.RCLONE_BIN,
-                "lsjson",
-                f"{remote_dest}/images",
-                "-R",
-                "--files-only",
+                "move",
+                remote_source,
+                move_dest,
+                "--files-from-raw", list_file_path,
+                "--transfers", str(settings.RCLONE_TRANSFERS),
+                "--checkers", str(settings.RCLONE_CHECKERS),
+                "--timeout", settings.RCLONE_TIMEOUT,
+                "--contimeout", settings.RCLONE_CONNECT_TIMEOUT,
             ]
             if settings.RCLONE_CONFIG_PATH and Path(settings.RCLONE_CONFIG_PATH).exists():
-                v_cmd += ["--config", settings.RCLONE_CONFIG_PATH]
+                move_cmd += ["--config", settings.RCLONE_CONFIG_PATH]
 
-            v_res = subprocess.run(v_cmd, capture_output=True, text=True, timeout=120)
-            already_staged = False
-            if v_res.returncode == 0:
-                v_items = json.loads(v_res.stdout or "[]")
-                if len(v_items) == len(items):
-                    already_staged = True
-                    logger.info(f"All {len(items)} files are already staged in {remote_dest}/images.")
+            move_res = subprocess.run(move_cmd, capture_output=True, text=True, timeout=settings.TRANSFER_TIMEOUT_SECONDS)
+            if move_res.returncode != 0:
+                raise RuntimeError(f"Rclone move failed (code {move_res.returncode}): {move_res.stderr[:500]}")
 
-            if not already_staged:
-                # 2. Execute Rclone move (moves files out of main dataset directory into annotator workspace)
-                cmd = [
-                    settings.RCLONE_BIN,
-                    "move",
-                    remote_source,
-                    move_dest,
-                    "--files-from-raw", list_file_path,
-                    "--transfers", str(settings.RCLONE_TRANSFERS),
-                    "--checkers", str(settings.RCLONE_CHECKERS),
-                    "--timeout", settings.RCLONE_TIMEOUT,
-                    "--contimeout", settings.RCLONE_CONNECT_TIMEOUT,
-                ]
-                if settings.RCLONE_CONFIG_PATH and Path(settings.RCLONE_CONFIG_PATH).exists():
-                    cmd += ["--config", settings.RCLONE_CONFIG_PATH]
+            # Batch-copy only the exact assignment file list into the shared SSD cache.
+            all_have_images_prefix = all(f.normalized_path.startswith("images/") for _, f in items)
+            cache_remote_target = (
+                f"{dataset.remote_name}:{rel_workspace_dir}"
+                if all_have_images_prefix
+                else f"{dataset.remote_name}:{rel_workspace_dir}/images"
+            )
+            cache_cmd = [
+                settings.RCLONE_BIN,
+                "copy",
+                cache_remote_target,
+                str(cache_images),
+                "--files-from-raw", list_file_path,
+                "--transfers", str(settings.RCLONE_TRANSFERS),
+                "--checkers", str(settings.RCLONE_CHECKERS),
+                "--timeout", settings.RCLONE_TIMEOUT,
+                "--contimeout", settings.RCLONE_CONNECT_TIMEOUT,
+            ]
+            if settings.RCLONE_CONFIG_PATH and Path(settings.RCLONE_CONFIG_PATH).exists():
+                cache_cmd += ["--config", settings.RCLONE_CONFIG_PATH]
 
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.TRANSFER_TIMEOUT_SECONDS)
-                if res.returncode != 0:
-                    raise RuntimeError(f"Rclone move failed (code {res.returncode}): {res.stderr[:500]}")
+            cache_res = subprocess.run(cache_cmd, capture_output=True, text=True, timeout=settings.TRANSFER_TIMEOUT_SECONDS)
+            if cache_res.returncode != 0:
+                raise RuntimeError(f"Rclone SSD cache copy failed (code {cache_res.returncode}): {cache_res.stderr[:500]}")
 
-                # 3. Verify destination files using recursive lsjson
-                v_res = subprocess.run(v_cmd, capture_output=True, text=True, timeout=300)
-                if v_res.returncode != 0:
-                    raise RuntimeError(f"Rclone verification lsjson failed: {v_res.stderr[:500]}")
+            # Verify only the exact manifest entries; no recursive lsjson listing is needed.
+            if len(manifest_items) != len(items):
+                raise RuntimeError("Assignment manifest item count mismatch")
 
-                v_items = json.loads(v_res.stdout or "[]")
-                if len(v_items) != len(items):
-                    raise RuntimeError(f"Verification count mismatch: expected {len(items)}, found {len(v_items)}")
+            for m_item in manifest_items:
+                relative_path = m_item["relative_path"]
+                cache_path = (cache_images / relative_path).resolve()
+                try:
+                    cache_path.relative_to(cache_images.resolve())
+                except ValueError:
+                    raise RuntimeError(f"Unsafe assignment cache path: {relative_path}")
+                if not cache_path.is_file():
+                    raise RuntimeError(f"Cached image missing: {relative_path}")
+                actual_size = cache_path.stat().st_size
+                expected_size = m_item["size"]
+                if actual_size != expected_size:
+                    raise RuntimeError(
+                        f"Cache verification size mismatch for {relative_path}: "
+                        f"expected {expected_size}, found {actual_size}"
+                    )
 
-            # 4. Upload manifest
-            manifest_items = []
-            for item, file_record in items:
-                manifest_items.append({
-                    "item_id": item.id,
-                    "file_id": file_record.id,
-                    "ordinal": item.ordinal,
-                    "relative_path": file_record.normalized_path,
-                    "size": file_record.size,
-                    "fingerprint": file_record.fingerprint,
-                })
-
-            manifest_content = json.dumps({
+            manifest_content = {
                 "assignment_id": assignment.id,
                 "catalog_version": assignment.catalog_version,
                 "annotator_id": annotator.id,
                 "dataset_id": dataset.id,
-                "item_count": len(items),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "item_count": len(manifest_items),
                 "items": manifest_items,
-            }, indent=2)
+            }
 
+            _write_assignment_cache_manifest(cache_root, manifest_content)
+
+            # Upload the same exact manifest to the NAS workspace.
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as mf:
-                mf.write(manifest_content)
+                mf.write(json.dumps(manifest_content, indent=2))
                 mf_path = mf.name
 
             try:
@@ -222,20 +281,38 @@ def prepare_assignment_workspace(
                     "copyto",
                     mf_path,
                     f"{remote_dest}/manifest.json",
+                    "--timeout", settings.RCLONE_TIMEOUT,
+                    "--contimeout", settings.RCLONE_CONNECT_TIMEOUT,
                 ]
                 if settings.RCLONE_CONFIG_PATH and Path(settings.RCLONE_CONFIG_PATH).exists():
                     m_upload_cmd += ["--config", settings.RCLONE_CONFIG_PATH]
-                subprocess.run(m_upload_cmd, check=True, timeout=60)
+                manifest_res = subprocess.run(m_upload_cmd, capture_output=True, text=True, timeout=120)
+                if manifest_res.returncode != 0:
+                    raise RuntimeError(
+                        f"Rclone manifest upload failed (code {manifest_res.returncode}): {manifest_res.stderr[:500]}"
+                    )
             finally:
                 Path(mf_path).unlink(missing_ok=True)
 
+            _write_ready_marker(cache_root)
             assignment.workspace_path = rel_workspace_dir
             assignment.status = "READY"
-            db.add(SyncJob(job_type="CATALOG_SCAN", status="QUEUED", payload={"dataset_id": dataset.id}))
             db.commit()
-            logger.info(f"Assignment {assignment_id} staged and confirmed READY via Rclone.")
+            logger.info(f"Assignment {assignment_id} staged, cached, and confirmed READY via Rclone.")
             return True
 
         finally:
             Path(list_file_path).unlink(missing_ok=True)
+
+
+def _write_assignment_cache_manifest(cache_root: Path, manifest_data: Dict) -> None:
+    cache_root.mkdir(parents=True, exist_ok=True)
+    (cache_root / "manifest.json").write_text(
+        json.dumps(manifest_data, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_ready_marker(cache_root: Path) -> None:
+    (cache_root / ".ready").write_text("ready\n", encoding="utf-8")
 

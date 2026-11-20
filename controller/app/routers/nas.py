@@ -53,19 +53,17 @@ def test_connection(
     remote: Optional[str] = None,
     current_user: User = Depends(require_role(["ADMIN", "MANAGER"])),
 ):
-    """Test reachability to the configured NAS storage remote."""
+    """Test reachability to a manually selected remote for authorized administrators."""
     return test_nas_connection(remote_name=remote, force=True)
 
 
 @router.get("/status")
-def get_nas_status(
-    remote: Optional[str] = None,
-):
+def get_nas_status():
     """
-    Check real-time connectivity to the configured NAS storage remote.
-    Accessible to dashboard clients and annotator workstations for live health monitoring.
+    Check cached connectivity to the configured NAS storage remote.
+    Accessible to dashboard clients and annotator workstations for health monitoring.
     """
-    return test_nas_connection(remote_name=remote)
+    return test_nas_connection()
 
 
 

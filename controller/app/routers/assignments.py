@@ -26,6 +26,9 @@ from controller.app.assignment_service import (
     resume_assignment,
     cancel_assignment,
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/assignments", tags=["Assignments"])
 
@@ -272,11 +275,22 @@ def approve_completion(
     )
 
     # Release active image claims
+    file_ids = [
+        row.file_id
+        for row in db.query(ActiveImageClaim.file_id)
+        .filter(ActiveImageClaim.assignment_id == assignment.id)
+        .all()
+    ]
     claims_deleted = (
         db.query(ActiveImageClaim)
         .filter(ActiveImageClaim.assignment_id == assignment.id)
-        .delete()
+        .delete(synchronize_session=False)
     )
+    if file_ids:
+        db.query(DatasetFile).filter(DatasetFile.id.in_(file_ids)).update(
+            {DatasetFile.file_state: "ASSIGNED"},
+            synchronize_session=False,
+        )
 
     # Consolidate all annotated & non-annotated images + sidecar JSONs back to the main project directory
     try:

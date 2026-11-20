@@ -21,6 +21,27 @@ from controller.app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def release_assignment_claims(db: Session, assignment_id: int) -> int:
+    """Release active claims and incrementally update DatasetFile.file_state."""
+    file_ids = [
+        row.file_id
+        for row in db.query(ActiveImageClaim.file_id)
+        .filter(ActiveImageClaim.assignment_id == assignment_id)
+        .all()
+    ]
+    deleted = (
+        db.query(ActiveImageClaim)
+        .filter(ActiveImageClaim.assignment_id == assignment_id)
+        .delete(synchronize_session=False)
+    )
+    if file_ids:
+        db.query(DatasetFile).filter(DatasetFile.id.in_(file_ids)).update(
+            {DatasetFile.file_state: "ELIGIBLE"},
+            synchronize_session=False,
+        )
+    return deleted
+
+
 def create_atomic_assignment(
     db: Session,
     dataset_id: int,
@@ -175,6 +196,7 @@ def create_atomic_assignment(
             claimed_at=now_utc,
         )
         db.add(claim)
+        f.file_state = "ASSIGNED"
 
     # 8. Enqueue background staging job
     staging_job = SyncJob(
@@ -388,35 +410,16 @@ def restore_assignment_workspace(db: Session, assignment: Assignment) -> bool:
         except Exception as e:
             logger.warning(f"Mock mode workspace restore note: {e}")
 
-    # 4. Clean up any local server cache
+    # 4. Clean up any local server cache.
     try:
-        cache_dir = Path(f"/tmp/nas_cache/assignment_{assignment.id}")
+        cache_base = Path(os.getenv("CONTROLLER_CACHE_DIR", "/tmp/nas_cache"))
+        cache_dir = cache_base / f"assignment_{assignment.id}"
         shutil.rmtree(cache_dir, ignore_errors=True)
     except Exception:
         pass
 
-    # 5. Enqueue CATALOG_SCAN job to update file status in database
-    try:
-        from controller.app.models import SyncJob
-        existing_job = (
-            db.query(SyncJob)
-            .filter(
-                SyncJob.job_type == "CATALOG_SCAN",
-                SyncJob.status.in_(["QUEUED", "RUNNING", "RETRYING"]),
-            )
-            .all()
-        )
-        already_queued = any(isinstance(j.payload, dict) and j.payload.get("dataset_id") == dataset.id for j in existing_job)
-        if not already_queued:
-            scan_job = SyncJob(
-                job_type="CATALOG_SCAN",
-                status="QUEUED",
-                payload={"dataset_id": dataset.id},
-            )
-            db.add(scan_job)
-            db.flush()
-    except Exception as e:
-        logger.warning(f"Failed to queue catalog scan after workspace restore: {e}")
+    # Restore assigned claims to eligible incrementally; no full catalog scan is needed.
+    release_assignment_claims(db, assignment.id)
 
     return True
 

@@ -3,6 +3,7 @@ import time
 import subprocess
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from controller.app.config import settings
@@ -115,6 +116,7 @@ def resolve_rclone_config_path() -> str:
 
 
 _nas_conn_cache: Dict[str, Any] = {"timestamp": 0.0, "result": None}
+_nas_conn_lock = threading.Lock()
 
 
 def test_nas_connection(remote_name: Optional[str] = None, force: bool = False, cache_ttl: float = 300.0) -> Dict[str, Any]:
@@ -124,70 +126,75 @@ def test_nas_connection(remote_name: Optional[str] = None, force: bool = False, 
     if not force and not remote_name and _nas_conn_cache["result"] is not None and (now - _nas_conn_cache["timestamp"] < cache_ttl):
         return _nas_conn_cache["result"]
 
-    sync_rclone_config_from_env()
-    remote = remote_name or settings.DEFAULT_REMOTE_NAME
-    config_path = resolve_rclone_config_path()
+    with _nas_conn_lock:
+        # Double-check locking
+        if not force and not remote_name and _nas_conn_cache["result"] is not None and (now - _nas_conn_cache["timestamp"] < cache_ttl):
+            return _nas_conn_cache["result"]
 
-    # Determine probe target
-    test_path = settings.NAS_ROOT_PATH.strip() if settings.NAS_ROOT_PATH else ""
-    if test_path:
-        target = f"{remote}:{test_path}"
-    else:
-        target = f"{remote}:"
+        sync_rclone_config_from_env()
+        remote = remote_name or settings.DEFAULT_REMOTE_NAME
+        config_path = resolve_rclone_config_path()
 
-    cmd = [
-        settings.RCLONE_BIN,
-        "about",
-        target,
-        "--config",
-        config_path,
-        "--timeout",
-        "5s",
-        "--contimeout",
-        "4s",
-    ]
-    res: Dict[str, Any] = {}
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-        if proc.returncode == 0:
-            res = {"connected": True, "remote": remote, "target": target, "message": "NAS storage is reachable"}
+        # Determine probe target
+        test_path = settings.NAS_ROOT_PATH.strip() if settings.NAS_ROOT_PATH else ""
+        if test_path:
+            target = f"{remote}:{test_path}"
         else:
-            # Fallback to lsf if 'about' is not supported by backend
-            proc_lsf = subprocess.run(
-                [
-                    settings.RCLONE_BIN,
-                    "lsf",
-                    target,
-                    "--max-depth",
-                    "1",
-                    "--config",
-                    config_path,
-                    "--timeout",
-                    "5s",
-                    "--contimeout",
-                    "4s",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=8,
-            )
-            if proc_lsf.returncode == 0:
+            target = f"{remote}:"
+
+        cmd = [
+            settings.RCLONE_BIN,
+            "about",
+            target,
+            "--config",
+            config_path,
+            "--timeout",
+            "5s",
+            "--contimeout",
+            "4s",
+        ]
+        res: Dict[str, Any] = {}
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+            if proc.returncode == 0:
                 res = {"connected": True, "remote": remote, "target": target, "message": "NAS storage is reachable"}
             else:
-                err_msg = proc_lsf.stderr.strip() or proc.stderr.strip() or "Connection failed"
-                res = {
-                    "connected": False,
-                    "remote": remote,
-                    "target": target,
-                    "error": err_msg,
-                }
-    except Exception as exc:
-        res = {"connected": False, "remote": remote, "target": target, "error": str(exc)}
+                # Fallback to lsf if 'about' is not supported by backend
+                proc_lsf = subprocess.run(
+                    [
+                        settings.RCLONE_BIN,
+                        "lsf",
+                        target,
+                        "--max-depth",
+                        "1",
+                        "--config",
+                        config_path,
+                        "--timeout",
+                        "5s",
+                        "--contimeout",
+                        "4s",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                )
+                if proc_lsf.returncode == 0:
+                    res = {"connected": True, "remote": remote, "target": target, "message": "NAS storage is reachable"}
+                else:
+                    err_msg = proc_lsf.stderr.strip() or proc.stderr.strip() or "Connection failed"
+                    res = {
+                        "connected": False,
+                        "remote": remote,
+                        "target": target,
+                        "error": err_msg,
+                    }
+        except Exception as exc:
+            res = {"connected": False, "remote": remote, "target": target, "error": str(exc)}
 
-    if not remote_name:
-        _nas_conn_cache["timestamp"] = time.time()
-        _nas_conn_cache["result"] = res
-    return res
+        if not remote_name:
+            _nas_conn_cache["timestamp"] = time.time()
+            _nas_conn_cache["result"] = res
+        return res
 
 
 def browse_nas_directories(
