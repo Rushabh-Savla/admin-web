@@ -250,6 +250,12 @@ def execute_job(db: Session, job: SyncJob, mock_base_dir: Optional[str] = None):
                     assign = db.query(Assignment).filter(Assignment.id == assign_id).first()
                     if assign and assign.status == "PREPARING":
                         assign.status = "FAILED"
+            elif job.job_type == "CATALOG_SCAN":
+                dataset_id = job.payload.get("dataset_id")
+                if dataset_id:
+                    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+                    if ds and ds.catalog_state == "SCANNING":
+                        ds.catalog_state = "FAILED"
         else:
             job.status = "RETRYING"
             # Exponential backoff: 10s, 20s, 40s, 80s... max 900s

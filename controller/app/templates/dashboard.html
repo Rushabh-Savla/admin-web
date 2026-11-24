@@ -496,23 +496,41 @@
 <form id="delete-project-form" method="POST" action="" style="display: none;"></form>
 
 <script>
-// Project Accordion: Collapse by default, expand on user click
+// Project Accordion: Persist expanded state across reloads and tab navigations
+function getExpandedProjects() {
+  try {
+    return JSON.parse(sessionStorage.getItem("nas_expanded_projects") || "[]");
+  } catch(e) {
+    return [];
+  }
+}
+
+function saveExpandedProjects(ids) {
+  try {
+    sessionStorage.setItem("nas_expanded_projects", JSON.stringify(ids));
+  } catch(e) {}
+}
+
 function toggleProjectFolder(id) {
   const content = document.getElementById(`proj-expanded-${id}`);
   const chevron = document.getElementById(`proj-chevron-${id}`);
   const label = document.getElementById(`proj-expand-label-${id}`);
   if (!content) return;
 
+  let expanded = getExpandedProjects();
   const isHidden = content.style.display === "none";
   if (isHidden) {
     content.style.display = "block";
     if (chevron) chevron.textContent = "▼";
     if (label) label.textContent = "Collapse ▴";
+    if (!expanded.includes(id)) expanded.push(id);
   } else {
     content.style.display = "none";
     if (chevron) chevron.textContent = "▶";
     if (label) label.textContent = "Expand ▾";
+    expanded = expanded.filter(x => x !== id);
   }
+  saveExpandedProjects(expanded);
 }
 
 let allExpanded = false;
@@ -521,8 +539,11 @@ function toggleAllProjects() {
   const btn = document.getElementById("btn-toggle-all-projects");
   if (btn) btn.textContent = allExpanded ? "Collapse All ▴" : "Expand All ▾";
 
+  const allIds = [];
   document.querySelectorAll(".project-expanded-content").forEach((el) => {
     el.style.display = allExpanded ? "block" : "none";
+    const id = parseInt(el.id.replace("proj-expanded-", ""), 10);
+    if (!isNaN(id)) allIds.push(id);
   });
   document.querySelectorAll("[id^='proj-chevron-']").forEach((el) => {
     el.textContent = allExpanded ? "▼" : "▶";
@@ -530,7 +551,23 @@ function toggleAllProjects() {
   document.querySelectorAll("[id^='proj-expand-label-']").forEach((el) => {
     el.textContent = allExpanded ? "Collapse ▴" : "Expand ▾";
   });
+  saveExpandedProjects(allExpanded ? allIds : []);
 }
+
+// Restore expanded state on page load
+document.addEventListener("DOMContentLoaded", function() {
+  const expanded = getExpandedProjects();
+  expanded.forEach(id => {
+    const content = document.getElementById(`proj-expanded-${id}`);
+    const chevron = document.getElementById(`proj-chevron-${id}`);
+    const label = document.getElementById(`proj-expand-label-${id}`);
+    if (content) {
+      content.style.display = "block";
+      if (chevron) chevron.textContent = "▼";
+      if (label) label.textContent = "Collapse ▴";
+    }
+  });
+});
 
 function switchDashboardTab(tab) {
   const projBtn = document.getElementById("btn-tab-projects");
